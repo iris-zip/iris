@@ -1,0 +1,169 @@
+<!doctype html>
+<html lang="en">
+<head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+    <title>Beem</title>
+    <link rel="stylesheet" href="style.css">
+</head>
+<body>
+
+    <main id="view-landing" class="bm-view">
+
+        <div class="bm-wordmark">
+            <svg class="bm-wordmark-svg" viewBox="0 0 32 32" fill="none" aria-hidden="true">
+                <path d="M16 4 L26 16 L16 28 L6 16 Z" fill="currentColor" opacity="0.15"/>
+                <path d="M16 8 L23 16 L16 24 L9 16 Z" fill="currentColor" opacity="0.4"/>
+                <path d="M16 12 L20 16 L16 20 L12 16 Z" fill="currentColor"/>
+            </svg>
+            <span class="bm-wordmark-text">BEEM</span>
+            <span class="bm-wordmark-sub">Encrypted transfer</span>
+        </div>
+
+        <div class="bm-action-stack">
+            <button id="btn-send" class="bm-btn bm-btn--primary" type="button">
+                <svg width="16" height="16" viewBox="0 0 24 24" fill="none"
+                     stroke="currentColor" stroke-width="1.5"
+                     stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+                    <line x1="22" y1="2" x2="11" y2="13"/>
+                    <polygon points="22 2 15 22 11 13 2 9 22 2"/>
+                </svg>
+                Send
+            </button>
+
+            <button id="btn-receive" class="bm-btn bm-btn--secondary" type="button">
+                <svg width="16" height="16" viewBox="0 0 24 24" fill="none"
+                     stroke="currentColor" stroke-width="1.5"
+                     stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+                    <path d="M5 12.55a11 11 0 0 1 14.08 0"/>
+                    <path d="M1.42 9a16 16 0 0 1 21.16 0"/>
+                    <path d="M8.53 16.11a6 6 0 0 1 6.95 0"/>
+                    <line x1="12" y1="20" x2="12.01" y2="20"/>
+                </svg>
+                Receive
+            </button>
+        </div>
+
+        <p class="bm-tagline">
+            No account&nbsp;·&nbsp;End-to-end encrypted<br>
+            Nothing stored
+        </p>
+
+    </main>
+
+    <main id="view-sender" class="bm-view" hidden>
+
+        <p class="bm-sender-label">Share this code</p>
+
+        <div id="big-code" aria-label="Pairing code" role="text"></div>
+
+        <div class="bm-code-actions">
+            <button class="bm-copy-btn" type="button" aria-label="Copy pairing code to clipboard">
+                <svg class="bm-copy-icon" width="14" height="14" viewBox="0 0 24 24" fill="none"
+                     stroke="currentColor" stroke-width="1.5"
+                     stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+                    <rect x="9" y="9" width="13" height="13" rx="2" ry="2"/>
+                    <path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/>
+                </svg>
+                <span class="bm-copy-label">Copy code</span>
+            </button>
+        </div>
+
+        <hr class="bm-divider">
+
+        <div id="wait-msg" class="bm-status-chip bm-status-chip--warn" role="status" aria-live="polite">
+            <span class="bm-status-dot bm-status-dot--waiting"></span>
+            <span class="bm-wait-label">Waiting for peer&hellip;</span>
+        </div>
+
+    </main>
+
+    <main id="view-receiver" class="bm-view" hidden>
+
+        <label class="bm-receiver-label" for="code-input">Enter the 5-digit code</label>
+
+        <input id="code-input"
+               type="text"
+               inputmode="numeric"
+               pattern="\d{5}"
+               maxlength="5"
+               autocomplete="off"
+               autocorrect="off"
+               spellcheck="false"
+               placeholder="_ _ _ _ _"
+               aria-describedby="receiver-error">
+
+        <p id="receiver-error" class="bm-error-line" aria-live="polite"></p>
+
+        <div class="bm-rate-banner bm-rate-banner--5min" hidden>
+            Too many attempts. Try again in
+            <time id="rate-countdown" datetime="">5:00</time>.
+        </div>
+
+        <div class="bm-rate-banner bm-rate-banner--30min" hidden>
+            Multiple failed attempts detected. Blocked for 30&nbsp;minutes.
+        </div>
+
+        <div class="bm-rate-banner bm-rate-banner--24h" hidden>
+            Access suspended for 24&nbsp;hours due to repeated violations.
+        </div>
+
+        <button id="btn-join" class="bm-btn bm-btn--primary" type="button">Join</button>
+
+    </main>
+
+    <div id="view-chat" hidden>
+
+        <header id="chat-header">
+            <span class="bm-chat-name">Beem</span>
+            <div class="bm-status-chip bm-status-chip--ok" role="status" aria-live="polite">
+                <span class="bm-status-dot"></span>
+                <span>Connected</span>
+            </div>
+        </header>
+
+        <div id="chat-log" class="bm-chat-log" aria-label="Chat log" aria-live="polite"></div>
+
+        <p id="file-status" aria-live="polite"></p>
+
+        <div class="bm-input-bar">
+            <button id="btn-file-pick" class="bm-icon-btn" type="button" aria-label="Attach file">
+                <svg width="16" height="16" viewBox="0 0 24 24" fill="none"
+                     stroke="currentColor" stroke-width="1.5"
+                     stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+                    <path d="M21.44 11.05l-9.19 9.19a6 6 0 0 1-8.49-8.49l9.19-9.19a4 4 0 0 1 5.66 5.66l-9.2 9.19a2 2 0 0 1-2.83-2.83l8.49-8.48"/>
+                </svg>
+            </button>
+
+            <input id="file-input" type="file" hidden aria-hidden="true">
+
+            <textarea id="chat-input"
+                      rows="1"
+                      placeholder="Type or paste text&hellip;"
+                      aria-label="Message"
+                      autocomplete="off"
+                      autocorrect="off"
+                      spellcheck="true"></textarea>
+
+            <button id="btn-chat-send" class="bm-icon-btn bm-icon-btn--primary"
+                    type="button" aria-label="Send message">
+                <svg width="16" height="16" viewBox="0 0 24 24" fill="none"
+                     stroke="currentColor" stroke-width="1.5"
+                     stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+                    <line x1="22" y1="2" x2="11" y2="13"/>
+                    <polygon points="22 2 15 22 11 13 2 9 22 2"/>
+                </svg>
+            </button>
+        </div>
+
+    </div>
+
+    <div id="view-fatal" class="bm-fatal-view" hidden role="alert">
+        <p class="bm-fatal-title">Connection lost</p>
+        <p class="bm-fatal-body">The session ended unexpectedly. Nothing was stored.</p>
+        <p class="bm-fatal-instruction">Close this tab and start a new session.</p>
+    </div>
+
+    <script type="module" src="app.js" integrity="sha384-CEZho2rjoZFQehPDjiFDVVYE3j0W+YI4psNwGgIV1oz3/X2wQdbTmE0dyftTMviO"></script>
+</body>
+</html>
