@@ -229,6 +229,7 @@ let myHash = null;
 let step = null;
 let aborted = false;
 let sendCounter = 0n;
+let recvCounter = -1n; // strictly increasing; reject replays and reordered frames
 
 // WebRTC direct channel — set up after PAKE completes, falls back to WS relay silently
 let rtcPeer = null;
@@ -345,6 +346,7 @@ function openWs(code) {
     pakeKey = xShared = derivedKey = myHash = null;
     aborted = false;
     sendCounter = 0n;
+    recvCounter = -1n;
     preCloseCode = 0;
     preCloseReason = "";
 
@@ -391,6 +393,8 @@ function openWs(code) {
             const type  = frame[0];
             const nonce = frame.slice(1, 13);
             const ct    = frame.slice(13);
+            const incomingCounter = new DataView(nonce.buffer, nonce.byteOffset, 12).getBigUint64(4, false);
+            if (incomingCounter <= recvCounter) { appendSystemMsg("(replay rejected)"); return; }
             let pt;
             try {
                 pt = decrypt(derivedKey, nonce, ct);
@@ -398,13 +402,13 @@ function openWs(code) {
                 appendSystemMsg("(decrypt failed \u2014 frame rejected)");
                 return;
             }
+            recvCounter = incomingCounter;
             handleChatPayload(type, pt);
             return;
         }
 
         if (!(e.data instanceof ArrayBuffer)) return;
         const buf = new Uint8Array(e.data);
-
         if (role === "sender" && step === "await-rx-info") {
             if (buf.length !== RX_INFO_LEN) { abort("Handshake failed (size)."); return; }
             const peerPake = buf.slice(0, PAKE_MSG_LEN);
@@ -608,9 +612,20 @@ function setupWebRTC() {
 }
 
 function wireDataChannel(dc) {
-    dc.onopen = () => {
+    dc.onopen = async () => {
         useRTC = true;
-        appendSystemMsg("Direct connection — server bypassed");
+        let label = "Direct";
+        try {
+            const stats = await rtcPeer.getStats();
+            let pairId = null;
+            stats.forEach(s => { if (s.type === "candidate-pair" && s.nominated) pairId = s.localCandidateId; });
+            if (pairId) {
+                const c = stats.get(pairId);
+                if (c?.candidateType === "host")  label = "Direct LAN";
+                else if (c?.candidateType === "srflx") label = "P2P (internet)";
+            }
+        } catch (_) {}
+        appendSystemMsg(`${label} connection — server bypassed`);
     };
     dc.onclose = () => { useRTC = false; };
     dc.onerror = () => { useRTC = false; };
@@ -620,8 +635,11 @@ function wireDataChannel(dc) {
         if (buf.length < 13) return;
         const type = buf[0];
         const nonce = buf.slice(1, 13);
+        const dcCounter = new DataView(nonce.buffer, nonce.byteOffset, 12).getBigUint64(4, false);
+        if (dcCounter <= recvCounter) return;
         let pt;
         try { pt = decrypt(derivedKey, nonce, buf.slice(13)); } catch (_) { return; }
+        recvCounter = dcCounter;
         handleChatPayload(type, pt);
     };
 }
@@ -760,10 +778,11 @@ function appendFileRow(name, sizeBytes, direction) {
     return { row, meta, fill };
 }
 
-function updateFileRow(refs, doneBytes, totalBytes, label) {
+function updateFileRow(refs, doneBytes, totalBytes, label, speedBps) {
     const pct = totalBytes > 0 ? Math.min(100, (doneBytes / totalBytes) * 100) : 0;
     refs.fill.style.width = `${pct.toFixed(1)}%`;
-    refs.meta.textContent = `${label} \u00b7 ${fmtBytes(doneBytes)} / ${fmtBytes(totalBytes)}`;
+    const speed = speedBps > 0 ? ` \u00b7 ${fmtBytes(speedBps)}/s` : "";
+    refs.meta.textContent = `${label} \u00b7 ${fmtBytes(doneBytes)} / ${fmtBytes(totalBytes)}${speed}`;
 }
 
 function completeFileRow(refs, totalBytes, finalLabel) {
@@ -803,6 +822,8 @@ async function sendFile(file) {
     const refs = appendFileRow(file.name, file.size, "out");
     const totalChunks = Math.max(1, Math.ceil(file.size / CHUNK_SIZE));
     let sentBytes = 0;
+    // Sliding 1-second window: array of [timestamp, bytes] samples
+    let speedSamples = [];
 
     for (let i = 0; i < totalChunks; i++) {
         const offset = i * CHUNK_SIZE;
@@ -816,13 +837,20 @@ async function sendFile(file) {
             return;
         }
         sentBytes += buf.length;
-        // Backpressure: drain the active send buffer before pushing more chunks.
+        const now = Date.now();
+        speedSamples.push([now, buf.length]);
+        // Backpressure: WS relay needs tight cap to avoid overflowing broadcast channel.
+        // DataChannel has SCTP congestion control — use a loose cap just to avoid OOM.
         const bufTarget = (useRTC && dataChannel) ? dataChannel : ws;
-        while (bufTarget && bufTarget.bufferedAmount > MAX_WS_BUFFER) {
+        const bufCap = useRTC ? 8 * 1024 * 1024 : MAX_WS_BUFFER;
+        while (bufTarget && bufTarget.bufferedAmount > bufCap) {
             await new Promise(r => setTimeout(r, 10));
         }
         if ((i & 0x0f) === 0 || i === totalChunks - 1) {
-            updateFileRow(refs, sentBytes, file.size, "Sending");
+            const t = Date.now();
+            speedSamples = speedSamples.filter(s => t - s[0] <= 1000);
+            const bps = speedSamples.reduce((a, s) => a + s[1], 0);
+            updateFileRow(refs, sentBytes, file.size, "Sending", bps);
             await new Promise(r => setTimeout(r, 0));
         }
     }
@@ -841,7 +869,7 @@ function handleFileHdr(pt) {
     if (pt.length !== 10 + nameLen) { appendSystemMsg("(bad file header)"); return; }
     const name = textDec.decode(pt.slice(10, 10 + nameLen));
     const refs = appendFileRow(name, size, "in");
-    recvFile = { name, size, parts: [], received: 0, refs };
+    recvFile = { name, size, parts: [], received: 0, refs, speedSamples: [] };
 }
 
 function handleFileChunk(pt) {
@@ -851,7 +879,11 @@ function handleFileChunk(pt) {
     const data = pt.slice(4);
     recvFile.parts[idx] = data;
     recvFile.received += data.length;
-    updateFileRow(recvFile.refs, recvFile.received, recvFile.size, "Receiving");
+    const t = Date.now();
+    recvFile.speedSamples.push([t, data.length]);
+    recvFile.speedSamples = recvFile.speedSamples.filter(s => t - s[0] <= 1000);
+    const bps = recvFile.speedSamples.reduce((a, s) => a + s[1], 0);
+    updateFileRow(recvFile.refs, recvFile.received, recvFile.size, "Receiving", bps);
 }
 
 function handleFileEnd() {
