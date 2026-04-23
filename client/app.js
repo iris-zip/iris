@@ -245,6 +245,14 @@ let useRTC = false;
 let preCloseCode = 0;
 let preCloseReason = "";
 
+// Mobile resume: when iOS/Android freezes the tab (file picker, gallery scroll)
+// the OS can kill the WS. Server holds the room for RESUME_GRACE_SECS; the
+// client gets that same window to silently reopen the WS and re-enter chat
+// mode with the existing derivedKey + counters. Deadline is absolute (ms epoch)
+// so repeated reconnect attempts don't extend the total grace.
+const RESUME_GRACE_MS = 30_000;
+let resumeUntil = 0;
+
 const COUNTER_MAX = (1n << 64n) - 1n;
 
 function makeNonce(counter) {
@@ -344,15 +352,17 @@ function joinAsReceiver() {
     openWs(code);
 }
 
-function openWs(code) {
+function openWs(code, resume = false) {
     if (ws) { try { ws.close(); } catch (_) {} }
-    pakeState = ownPakeMsg = null;
-    xSk = xPk = null;
-    mlDk = mlEk = null;
-    pakeKey = xShared = derivedKey = myHash = null;
-    aborted = false;
-    sendCounter = 0n;
-    recvCounter = -1n;
+    if (!resume) {
+        pakeState = ownPakeMsg = null;
+        xSk = xPk = null;
+        mlDk = mlEk = null;
+        pakeKey = xShared = derivedKey = myHash = null;
+        aborted = false;
+        sendCounter = 0n;
+        recvCounter = -1n;
+    }
     preCloseCode = 0;
     preCloseReason = "";
 
@@ -361,6 +371,13 @@ function openWs(code) {
     ws.binaryType = "arraybuffer";
 
     ws.addEventListener("open", () => {
+        if (resume) {
+            // Handshake state is already in memory; server just relays bytes.
+            step = "chat";
+            resumeUntil = 0;
+            setChatChip("ok", "Connected");
+            return;
+        }
         const xkp = x25519_keypair();
         xSk = xkp.slice(0, 32);
         xPk = xkp.slice(32, 64);
@@ -495,11 +512,17 @@ function openWs(code) {
         const reason = useMarker ? preCloseReason : ((ev && ev.reason) ? ev.reason : "");
 
         if (step === "chat") {
-            const note = code === CLOSE.SESSION_TIMEOUT
-                ? "(session time limit reached)"
-                : "(peer disconnected)";
-            appendSystemMsg(note);
-            endChatSession();
+            // Known end-of-session codes: actually end the chat.
+            if (code === CLOSE.SESSION_TIMEOUT || code === CLOSE.PEER_LEFT) {
+                appendSystemMsg(code === CLOSE.SESSION_TIMEOUT
+                    ? "(session time limit reached)"
+                    : "(peer disconnected)");
+                endChatSession();
+                return;
+            }
+            // Anything else during chat (1006 from OS-killed TCP when the tab is
+            // backgrounded for a file picker) — try to silently resume.
+            attemptResume();
             return;
         }
 
@@ -563,6 +586,31 @@ function enterChat(_code) {
     $("chat-input").value = "";
     show("chat");
     $("chat-input").focus();
+}
+
+// Update the chat-header status chip without rewriting its DOM structure.
+function setChatChip(tone, text) {
+    const chip = document.querySelector("#chat-header .bm-status-chip");
+    if (!chip) return;
+    chip.classList.remove("bm-status-chip--ok", "bm-status-chip--warn", "bm-status-chip--err");
+    chip.classList.add(`bm-status-chip--${tone}`);
+    const label = chip.querySelector("span:last-child");
+    if (label) label.textContent = text;
+}
+
+// Mobile resume: reopen the WS silently within the grace window. The AEAD key
+// stays in JS memory across tab freeze, so the reopened socket goes straight
+// into chat mode. If grace runs out, admit the disconnect for real.
+function attemptResume() {
+    if (resumeUntil === 0) resumeUntil = Date.now() + RESUME_GRACE_MS;
+    if (Date.now() > resumeUntil) {
+        resumeUntil = 0;
+        appendSystemMsg("(peer disconnected)");
+        endChatSession();
+        return;
+    }
+    setChatChip("warn", "Reconnecting…");
+    openWs(currentCode, true);
 }
 
 // 15.9 Peer gone / session ended: disable inputs, flip the header chip to err tone.

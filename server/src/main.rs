@@ -48,6 +48,13 @@ const MAX_CODE_ATTEMPTS: u32 = 5;
 // 2 connections (sender + receiver, different IPs). 8 is generous for reconnects.
 const MAX_CONCURRENT_PER_IP: u32 = 8;
 
+// Mobile browsers freeze/kill the WS when the tab is backgrounded (file picker,
+// photo gallery). Instead of evicting the surviving peer the instant one side's
+// TCP dies, hold the room for this long so the original peer can reopen the WS
+// and resume. Encrypted frames are validated peer-side by the AEAD key — an
+// imposter who snipes the slot cannot produce valid ciphertext.
+const RESUME_GRACE_SECS: u64 = 30;
+
 // 15.3 Tiered-ban escalation.
 const BAN_COOLDOWN_WINDOW_SECS: u64 = 3600; // 1 h — 3 cooldowns here → 30-min ban
 const BAN_COOLDOWN_THRESHOLD: usize = 3;
@@ -487,7 +494,9 @@ async fn ws_handler(
 async fn pair(mut socket: WebSocket, code: String, rooms: Rooms, session_secs: u64) {
     // 15.11 Per-code brute-force guard: increment attempts on lookup. If this
     // attempt would put us at or past MAX_CODE_ATTEMPTS, burn the room entirely.
-    let tx = {
+    // Also capture attempt count before increment — only the first 2 connections
+    // (the legitimate pair) are allowed to broadcast close signals to each other.
+    let (tx, is_pair_member) = {
         let mut entry = match rooms.get_mut(&code) {
             Some(r) if r.expires_at > Instant::now() => r,
             _ => {
@@ -495,6 +504,7 @@ async fn pair(mut socket: WebSocket, code: String, rooms: Rooms, session_secs: u
                 return;
             }
         };
+        let attempt_before = entry.attempts;
         entry.attempts += 1;
         if entry.attempts >= MAX_CODE_ATTEMPTS {
             drop(entry); // release the write lock before the DashMap remove.
@@ -502,7 +512,16 @@ async fn pair(mut socket: WebSocket, code: String, rooms: Rooms, session_secs: u
             send_close_signal(&mut socket, CLOSE_CODE_MISSING, "").await;
             return;
         }
-        entry.tx.clone()
+        // attempts 0→1 = sender, 1→2 = receiver: legitimate pair members.
+        // attempts 2+ are either observers (attackers) OR reconnects after a mobile
+        // background event. Distinguish by channel state: if exactly one subscriber
+        // exists when we join, that's the surviving pair member holding the slot
+        // open — we're filling it, so we count as a pair member too (for grace
+        // purposes on our own exit). An attacker arrives when receiver_count is 0
+        // or ≥ 2 and stays marked as observer.
+        let tx = entry.tx.clone();
+        let is_pair_member = attempt_before < 2 || tx.receiver_count() == 1;
+        (tx, is_pair_member)
     };
     let mut rx = tx.subscribe();
     let my_id = NEXT_ID.fetch_add(1, Ordering::Relaxed);
@@ -549,11 +568,28 @@ async fn pair(mut socket: WebSocket, code: String, rooms: Rooms, session_secs: u
     }
 
     // 15.9 On our exit (tab close, error, deadline), tell the other peer once.
-    if !peer_closed_us {
-        let _ = tx.send((my_id, Message::Close(Some(CloseFrame {
-            code: CLOSE_PEER_LEFT,
-            reason: "".into(),
-        }))));
+    // Only legitimate pair members (first 2 connections) may evict each other.
+    // Third-party observers closing must not terminate the active session.
+    //
+    // Mobile resume: delay the peer-left broadcast by RESUME_GRACE_SECS so the
+    // original peer can reopen the WS (e.g. returning from the photo picker).
+    // If someone resubscribes to `tx` in that window, receiver_count climbs
+    // above 1 (survivor + reconnect) and we skip the close. Bump room expiry
+    // so the sweeper doesn't GC the room mid-grace.
+    if !peer_closed_us && is_pair_member {
+        if let Some(mut r) = rooms.get_mut(&code) {
+            r.expires_at = Instant::now() + Duration::from_secs(RESUME_GRACE_SECS + 10);
+        }
+        let tx_grace = tx.clone();
+        tokio::spawn(async move {
+            tokio::time::sleep(Duration::from_secs(RESUME_GRACE_SECS)).await;
+            if tx_grace.receiver_count() <= 1 {
+                let _ = tx_grace.send((my_id, Message::Close(Some(CloseFrame {
+                    code: CLOSE_PEER_LEFT,
+                    reason: "".into(),
+                }))));
+            }
+        });
     }
 }
 
