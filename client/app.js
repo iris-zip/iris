@@ -245,7 +245,10 @@ let useRTC = false;
 let preCloseCode = 0;
 let preCloseReason = "";
 
+const COUNTER_MAX = (1n << 64n) - 1n;
+
 function makeNonce(counter) {
+    if (counter >= COUNTER_MAX) { abort("Session ended: counter exhausted."); return null; }
     // 12-byte nonce: 4 zero bytes || 8-byte big-endian counter.
     const n = new Uint8Array(12);
     const view = new DataView(n.buffer);
@@ -651,6 +654,7 @@ function sendSignal(type, jsonStr) {
     // Signaling goes over WS relay even when useRTC is true
     if (!ws || ws.readyState !== WebSocket.OPEN) return;
     const nonce = makeNonce(sendCounter);
+    if (!nonce) return;
     sendCounter += 1n;
     const plaintext = textEnc.encode(jsonStr);
     let ct;
@@ -684,6 +688,7 @@ function sendPayload(type, plaintext) {
                   (type === T_FILE_HDR || type === T_FILE_CHK || type === T_FILE_END);
     if (!viaDC && (!ws || ws.readyState !== WebSocket.OPEN)) return false;
     const nonce = makeNonce(sendCounter);
+    if (!nonce) return false;
     sendCounter += 1n;
     let ct;
     try {

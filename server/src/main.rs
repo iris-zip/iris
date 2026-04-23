@@ -43,6 +43,11 @@ const WS_COOLDOWN_SECS: u64 = 30;
 // a code on the first slip-up.
 const MAX_CODE_ATTEMPTS: u32 = 5;
 
+// Per-IP hard cap on simultaneously open WS connections. Prevents a botnet from
+// accumulating idle sessions up to the 5-min session timeout. Normal flow uses
+// 2 connections (sender + receiver, different IPs). 8 is generous for reconnects.
+const MAX_CONCURRENT_PER_IP: u32 = 8;
+
 // 15.3 Tiered-ban escalation.
 const BAN_COOLDOWN_WINDOW_SECS: u64 = 3600; // 1 h — 3 cooldowns here → 30-min ban
 const BAN_COOLDOWN_THRESHOLD: usize = 3;
@@ -117,11 +122,13 @@ enum BlockReason {
 }
 
 type RateLimits = Arc<DashMap<IpAddr, RateLimitState>>;
+type Concurrent = Arc<DashMap<IpAddr, u32>>;
 
 #[derive(Clone)]
 struct AppState {
     rooms: Rooms,
     rate_limits: RateLimits,
+    concurrent: Concurrent,
     session_secs: u64,
 }
 
@@ -150,8 +157,9 @@ async fn main() {
 
     let rooms: Rooms = Arc::new(DashMap::new());
     let rate_limits: RateLimits = Arc::new(DashMap::new());
+    let concurrent: Concurrent = Arc::new(DashMap::new());
     spawn_sweeper(rooms.clone(), rate_limits.clone());
-    let state = AppState { rooms, rate_limits, session_secs };
+    let state = AppState { rooms, rate_limits, concurrent, session_secs };
 
     // 12.1 Rate limit: /new ~ 10/min per IP (burst 10, replenish 1 per 6s).
     let governor_conf = Arc::new(
@@ -452,9 +460,28 @@ async fn ws_handler(
             send_close_signal(&mut socket, CLOSE_CODE_FORMAT, "").await;
         });
     }
+
+    // Per-IP concurrent connection cap — hard ceiling regardless of rate limit state.
+    {
+        let mut count = state.concurrent.entry(ip).or_insert(0);
+        if *count >= MAX_CONCURRENT_PER_IP {
+            return ws.on_upgrade(move |mut socket| async move {
+                send_close_signal(&mut socket, CLOSE_RATE_COOLDOWN, "too many connections").await;
+            });
+        }
+        *count += 1;
+    }
+
+    let concurrent = state.concurrent.clone();
     ws.max_message_size(MAX_WS_FRAME)
         .max_frame_size(MAX_WS_FRAME)
-        .on_upgrade(move |socket| pair(socket, params.code, state.rooms, state.session_secs))
+        .on_upgrade(move |socket| async move {
+            pair(socket, params.code, state.rooms, state.session_secs).await;
+            // Decrement active connection count for this IP.
+            if let Some(mut c) = concurrent.get_mut(&ip) {
+                *c = c.saturating_sub(1);
+            }
+        })
 }
 
 async fn pair(mut socket: WebSocket, code: String, rooms: Rooms, session_secs: u64) {
