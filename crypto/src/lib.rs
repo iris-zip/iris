@@ -323,4 +323,5 @@ mod tests {
         assert_eq!(derived_a, derived_b, "full handshake must produce equal keys on both sides");
         assert_eq!(derived_a.len(), 32);
     }
+
 }
