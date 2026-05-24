@@ -157,6 +157,7 @@ fn is_valid_code(s: &str) -> bool {
 
 #[tokio::main]
 async fn main() {
+    let host = std::env::var("BEEM_HOST").unwrap_or_else(|_| "127.0.0.1".to_string());
     let port: u16 = std::env::var("BEEM_PORT").ok()
         .and_then(|s| s.parse().ok()).unwrap_or(8080);
     let session_secs: u64 = std::env::var("BEEM_SESSION_SECS").ok()
@@ -219,11 +220,11 @@ async fn main() {
         .fallback_service(ServeDir::new("../client"))
         .layer(sec_headers);
 
-    let listener = tokio::net::TcpListener::bind(format!("127.0.0.1:{}", port))
+    let listener = tokio::net::TcpListener::bind(format!("{}:{}", host, port))
         .await
         .expect("bind");
     let actual_port = listener.local_addr().expect("local_addr").port();
-    println!("Beem listening on http://127.0.0.1:{}", actual_port);
+    println!("Beem listening on http://{}:{}", host, actual_port);
     axum::serve(
         listener,
         app.into_make_service_with_connect_info::<SocketAddr>(),

@@ -217,6 +217,7 @@ const RX_INFO_LEN   = PAKE_MSG_LEN + X25519_PK_LEN;                 // 65 (recei
 const TX_INFO_LEN   = PAKE_MSG_LEN + X25519_PK_LEN + MLKEM_EK_LEN;  // 1249 (sender -> receiver)
 
 let ws = null;
+let wsGen = 0; // incremented each openWs() call; stale close handlers self-discard
 let role = null;
 let currentCode = null;
 let pakeState = null;
@@ -231,8 +232,10 @@ let myHash = null;
 // Receiver: "await-sender-info" -> "await-hash" -> "chat"
 let step = null;
 let aborted = false;
-let sendCounter = 0n;
-let recvCounter = -1n; // strictly increasing; reject replays and reordered frames
+let sendCounterWS = 0n;
+let sendCounterDC = 0n;
+let recvCounterWS = -1n; // per-transport strictly increasing; prevents cross-transport replay drops
+let recvCounterDC = -1n;
 
 // WebRTC direct channel — set up after PAKE completes, falls back to WS relay silently
 let rtcPeer = null;
@@ -255,10 +258,12 @@ let resumeUntil = 0;
 
 const COUNTER_MAX = (1n << 64n) - 1n;
 
-function makeNonce(counter) {
+// transport: 0 = WebSocket, 1 = DataChannel — byte 3 of nonce separates counter spaces
+function makeNonce(counter, transport = 0) {
     if (counter >= COUNTER_MAX) { abort("Session ended: counter exhausted."); return null; }
-    // 12-byte nonce: 4 zero bytes || 8-byte big-endian counter.
+    // 12-byte nonce: [0,0,0,transport(1B)] || 8-byte big-endian counter
     const n = new Uint8Array(12);
+    n[3] = transport;
     const view = new DataView(n.buffer);
     view.setBigUint64(4, counter, false);
     return n;
@@ -353,6 +358,7 @@ function joinAsReceiver() {
 }
 
 function openWs(code, resume = false) {
+    const myGen = ++wsGen;
     if (ws) { try { ws.close(); } catch (_) {} }
     if (!resume) {
         pakeState = ownPakeMsg = null;
@@ -360,8 +366,10 @@ function openWs(code, resume = false) {
         mlDk = mlEk = null;
         pakeKey = xShared = derivedKey = myHash = null;
         aborted = false;
-        sendCounter = 0n;
-        recvCounter = -1n;
+        sendCounterWS = 0n;
+        sendCounterDC = 0n;
+        recvCounterWS = -1n;
+        recvCounterDC = -1n;
     }
     preCloseCode = 0;
     preCloseReason = "";
@@ -416,8 +424,9 @@ function openWs(code, resume = false) {
             const type  = frame[0];
             const nonce = frame.slice(1, 13);
             const ct    = frame.slice(13);
+            if (nonce[3] !== 0) { appendSystemMsg("(transport mismatch \u2014 frame rejected)"); return; }
             const incomingCounter = new DataView(nonce.buffer, nonce.byteOffset, 12).getBigUint64(4, false);
-            if (incomingCounter <= recvCounter) { appendSystemMsg("(replay rejected)"); return; }
+            if (incomingCounter <= recvCounterWS) { appendSystemMsg("(replay rejected)"); return; }
             let pt;
             try {
                 pt = decrypt(derivedKey, nonce, ct);
@@ -425,7 +434,7 @@ function openWs(code, resume = false) {
                 appendSystemMsg("(decrypt failed \u2014 frame rejected)");
                 return;
             }
-            recvCounter = incomingCounter;
+            recvCounterWS = incomingCounter;
             handleChatPayload(type, pt);
             return;
         }
@@ -503,6 +512,7 @@ function openWs(code, resume = false) {
     });
 
     ws.addEventListener("close", (ev) => {
+        if (wsGen !== myGen) return; // stale handler from a replaced WS — ignore
         if (aborted) return;
         // 15.10b If the real close frame was stripped (CF Tunnel → 1006), fall back
         // to the text marker the server sent just before closing.
@@ -671,12 +681,15 @@ function wireDataChannel(dc) {
         let label = "Direct";
         try {
             const stats = await rtcPeer.getStats();
-            let pairId = null;
-            stats.forEach(s => { if (s.type === "candidate-pair" && s.nominated) pairId = s.localCandidateId; });
-            if (pairId) {
-                const c = stats.get(pairId);
-                if (c?.candidateType === "host")  label = "Direct LAN";
-                else if (c?.candidateType === "srflx") label = "P2P (internet)";
+            let pair = null;
+            stats.forEach(s => { if (s.type === "candidate-pair" && s.nominated) pair = s; });
+            if (pair) {
+                const local  = stats.get(pair.localCandidateId);
+                const remote = stats.get(pair.remoteCandidateId);
+                const bothHost = local?.candidateType === "host" && remote?.candidateType === "host";
+                if (bothHost) label = "Direct LAN";
+                else if (local?.candidateType === "srflx" || remote?.candidateType === "srflx")
+                    label = "P2P (internet)";
             }
         } catch (_) {}
         appendSystemMsg(`${label} connection — server bypassed`);
@@ -689,11 +702,12 @@ function wireDataChannel(dc) {
         if (buf.length < 13) return;
         const type = buf[0];
         const nonce = buf.slice(1, 13);
+        if (nonce[3] !== 1) return;
         const dcCounter = new DataView(nonce.buffer, nonce.byteOffset, 12).getBigUint64(4, false);
-        if (dcCounter <= recvCounter) return;
+        if (dcCounter <= recvCounterDC) return;
         let pt;
         try { pt = decrypt(derivedKey, nonce, buf.slice(13)); } catch (_) { return; }
-        recvCounter = dcCounter;
+        recvCounterDC = dcCounter;
         handleChatPayload(type, pt);
     };
 }
@@ -701,9 +715,9 @@ function wireDataChannel(dc) {
 function sendSignal(type, jsonStr) {
     // Signaling goes over WS relay even when useRTC is true
     if (!ws || ws.readyState !== WebSocket.OPEN) return;
-    const nonce = makeNonce(sendCounter);
+    const nonce = makeNonce(sendCounterWS, 0);
     if (!nonce) return;
-    sendCounter += 1n;
+    sendCounterWS += 1n;
     const plaintext = textEnc.encode(jsonStr);
     let ct;
     try { ct = encrypt(derivedKey, nonce, plaintext); } catch (_) { return; }
@@ -735,9 +749,10 @@ function sendPayload(type, plaintext) {
     const viaDC = useRTC && dataChannel?.readyState === "open" &&
                   (type === T_FILE_HDR || type === T_FILE_CHK || type === T_FILE_END);
     if (!viaDC && (!ws || ws.readyState !== WebSocket.OPEN)) return false;
-    const nonce = makeNonce(sendCounter);
+    const transport = viaDC ? 1 : 0;
+    const nonce = makeNonce(viaDC ? sendCounterDC : sendCounterWS, transport);
     if (!nonce) return false;
-    sendCounter += 1n;
+    if (viaDC) { sendCounterDC += 1n; } else { sendCounterWS += 1n; }
     let ct;
     try {
         ct = encrypt(derivedKey, nonce, plaintext);
@@ -852,7 +867,7 @@ function failFileRow(refs, message) {
 }
 
 // ---- File transfer ----
-const CHUNK_SIZE = 64 * 1024;
+const CHUNK_SIZE = 128 * 1024; // 128 KB → encrypted frame ~128 KB + 33 B, safely under Chrome DC 256 KB max
 const MAX_FILE_SIZE = 1 * 1024 * 1024 * 1024; // 1 GB
 const MAX_WS_BUFFER = 512 * 1024; // pause sending when browser send buffer exceeds 512 KB
 
