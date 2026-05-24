@@ -1,7 +1,7 @@
 // 15.4 SRI — placeholders rewritten by scripts/build-sri.sh on release build.
 // Until rewritten, runtime check short-circuits with a dev-mode warning.
-const CRYPTO_JS_SRI   = "sha384-PYA//xguVMQ4B2VZrs4xm3EIwBHdH1Fb6JA97PcaXMHtbxmC0hyAoVBny5CSxJTA";
-const CRYPTO_WASM_SRI = "sha384-yX3JnO+ZlMSYMXNXDm1ml3KgngdJilL8wUQv4K/Otm7tRgWF5s1aLPfnbr9N5zQz";
+const CRYPTO_JS_SRI   = "sha384-Gr1tIk6pjzHVcntswXBnWZeOXLzDS1Y8NzHVuSkMxWBhmgoBUcObzqCCnc3Mn3X/";
+const CRYPTO_WASM_SRI = "sha384-BE4nNT06p5plJQONMwILJkvOZBdaICB5MZv4W/lOsbXOcjJh+97h2vT6/Ek6XiMQ";
 const SRI_PLACEHOLDER_PREFIX = "__SRI_";
 
 async function sha384Base64(buf) {
@@ -197,10 +197,11 @@ function bytesEq(a, b) {
 }
 
 // Chat / file frame type tags
-const T_TEXT     = 0x00;
-const T_FILE_HDR = 0x01;
-const T_FILE_CHK = 0x02;
-const T_FILE_END = 0x03;
+const T_TEXT      = 0x00;
+const T_FILE_HDR  = 0x01;
+const T_FILE_CHK  = 0x02;
+const T_FILE_END  = 0x03;
+const T_KEEPALIVE = 0x04; // WS heartbeat during DC transfers — keeps tunnel alive, receiver silently ignores
 // WebRTC signaling — travel over existing encrypted WS relay, no server changes needed
 const T_RTC_OFFER = 0x10;
 const T_RTC_ANSWER = 0x11;
@@ -255,6 +256,8 @@ let preCloseReason = "";
 // so repeated reconnect attempts don't extend the total grace.
 const RESUME_GRACE_MS = 30_000;
 let resumeUntil = 0;
+let wsKeepaliveTimer = null;
+let wakeLock = null;
 
 const COUNTER_MAX = (1n << 64n) - 1n;
 
@@ -337,12 +340,27 @@ async function startSender() {
             sp.textContent = digit;
             bc.appendChild(sp);
         }
+        renderQR(code);
         setWaitMsg("Waiting for peer\u2026", "warn");
         show("sender");
         openWs(code);
     } catch (e) {
         alert("Could not generate code: " + e.message);
     }
+}
+
+function renderQR(code) {
+    const el = $("qr-code");
+    if (!el || typeof QRCode === "undefined") return;
+    el.innerHTML = "";
+    new QRCode(el, {
+        text: `${location.origin}/#${code}`,
+        width: 160,
+        height: 160,
+        colorDark: "#000000",
+        colorLight: "#ffffff",
+        correctLevel: QRCode.CorrectLevel.L,
+    });
 }
 
 function joinAsReceiver() {
@@ -383,7 +401,10 @@ function openWs(code, resume = false) {
             // Handshake state is already in memory; server just relays bytes.
             step = "chat";
             resumeUntil = 0;
-            setChatChip("ok", "Connected");
+            // Don't flicker chip if DC is still actively transferring
+            if (!useRTC || dataChannel?.readyState !== "open") {
+                setChatChip("ok", "Connected");
+            }
             return;
         }
         const xkp = x25519_keypair();
@@ -596,6 +617,43 @@ function enterChat(_code) {
     $("chat-input").value = "";
     show("chat");
     $("chat-input").focus();
+    startWsKeepalive();
+    acquireWakeLock();
+}
+
+// Sends a no-op frame over WS every 20 s when DC is active, preventing Cloudflare
+// and other tunnel proxies from treating the idle signaling socket as dead.
+function startWsKeepalive() {
+    if (wsKeepaliveTimer !== null) clearInterval(wsKeepaliveTimer);
+    wsKeepaliveTimer = setInterval(() => {
+        if (step === "chat" && useRTC && dataChannel?.readyState === "open") {
+            sendPayload(T_KEEPALIVE, new Uint8Array(0));
+        }
+    }, 20_000);
+}
+
+function stopWsKeepalive() {
+    if (wsKeepaliveTimer !== null) { clearInterval(wsKeepaliveTimer); wsKeepaliveTimer = null; }
+}
+
+async function acquireWakeLock() {
+    if (!("wakeLock" in navigator)) return;
+    try {
+        wakeLock = await navigator.wakeLock.request("screen");
+        // OS releases wake lock automatically when tab is hidden — reacquire on visibility restore
+        document.addEventListener("visibilitychange", onVisibilityChange);
+    } catch (_) {}
+}
+
+function releaseWakeLock() {
+    document.removeEventListener("visibilitychange", onVisibilityChange);
+    if (wakeLock) { wakeLock.release(); wakeLock = null; }
+}
+
+async function onVisibilityChange() {
+    if (document.visibilityState === "visible" && step === "chat" && wakeLock === null) {
+        await acquireWakeLock();
+    }
 }
 
 // Update the chat-header status chip without rewriting its DOM structure.
@@ -619,7 +677,10 @@ function attemptResume() {
         endChatSession();
         return;
     }
-    setChatChip("warn", "Reconnecting…");
+    // Don't flicker chip while DataChannel is carrying the transfer
+    if (!useRTC || dataChannel?.readyState !== "open") {
+        setChatChip("warn", "Reconnecting…");
+    }
     openWs(currentCode, true);
 }
 
@@ -627,6 +688,8 @@ function attemptResume() {
 function endChatSession() {
     step = null;
     useRTC = false;
+    stopWsKeepalive();
+    releaseWakeLock();
     if (dataChannel) { dataChannel.close(); dataChannel = null; }
     if (rtcPeer) { rtcPeer.close(); rtcPeer = null; }
     for (const id of ["chat-input", "btn-chat-send", "btn-file-pick"]) {
@@ -793,6 +856,7 @@ function handleChatPayload(type, pt) {
         handleRTCSignal(type, pt);
         return;
     }
+    if (type === T_KEEPALIVE) return; // WS heartbeat — no-op on receiver
     appendSystemMsg(`(unknown frame type 0x${type.toString(16)})`);
 }
 
@@ -977,4 +1041,14 @@ function handleFileEnd() {
     link.download = f.name;
     link.textContent = `Download \u00b7 ${fmtBytes(f.size)}`;
     f.refs.meta.appendChild(link);
+}
+
+// Auto-receive: when a receiver scans the QR code the URL contains #DDDDD.
+// Pre-fill the code input and join immediately \u2014 no typing needed.
+if (/^#\d{5}$/.test(location.hash)) {
+    const code = location.hash.slice(1);
+    $("code-input").value = code;
+    clearRateBanners();
+    show("receiver");
+    joinAsReceiver();
 }

@@ -4,6 +4,7 @@ use axum::{
         ws::{CloseFrame, Message, WebSocket, WebSocketUpgrade},
         Query, State,
     },
+    http::StatusCode,
     response::IntoResponse,
     routing::{get, post},
     Json, Router,
@@ -235,21 +236,30 @@ async fn main() {
 
 fn spawn_sweeper(rooms: Rooms, rate_limits: RateLimits) {
     tokio::spawn(async move {
-        let mut interval = tokio::time::interval(Duration::from_secs(10));
-        let window = Duration::from_secs(WS_WINDOW_SECS);
-        let ban_medium_window = Duration::from_secs(BAN_MEDIUM_WINDOW_SECS);
         loop {
-            interval.tick().await;
-            let now = Instant::now();
-            rooms.retain(|_, r| r.expires_at > now);
-            // 15.2 + 15.3 GC: keep entries with any active state or recent history.
-            rate_limits.retain(|_, s| {
-                let has_recent = s.attempts.back().map_or(false, |t| now.duration_since(*t) < window);
-                let in_cooldown = s.cooldown_until.map_or(false, |u| u > now);
-                let in_ban = s.ban_until.map_or(false, |u| u > now);
-                let recent_ban_history = s.ban_history.back().map_or(false, |t| now.duration_since(*t) < ban_medium_window);
-                has_recent || in_cooldown || in_ban || recent_ban_history
-            });
+            let r = rooms.clone();
+            let rl = rate_limits.clone();
+            let result = tokio::spawn(async move {
+                let mut interval = tokio::time::interval(Duration::from_secs(10));
+                let window = Duration::from_secs(WS_WINDOW_SECS);
+                let ban_medium_window = Duration::from_secs(BAN_MEDIUM_WINDOW_SECS);
+                loop {
+                    interval.tick().await;
+                    let now = Instant::now();
+                    r.retain(|_, r| r.expires_at > now);
+                    // 15.2 + 15.3 GC: keep entries with any active state or recent history.
+                    rl.retain(|_, s| {
+                        let has_recent = s.attempts.back().map_or(false, |t| now.duration_since(*t) < window);
+                        let in_cooldown = s.cooldown_until.map_or(false, |u| u > now);
+                        let in_ban = s.ban_until.map_or(false, |u| u > now);
+                        let recent_ban_history = s.ban_history.back().map_or(false, |t| now.duration_since(*t) < ban_medium_window);
+                        has_recent || in_cooldown || in_ban || recent_ban_history
+                    });
+                }
+            }).await;
+            if let Err(e) = result {
+                eprintln!("[sweeper] task died: {e} — restarting");
+            }
         }
     });
 }
@@ -258,10 +268,10 @@ fn generate_code<R: Rng>(rng: &mut R) -> String {
     format!("{:05}", rng.gen_range(0..100000))
 }
 
-async fn new_code(State(state): State<AppState>) -> Json<NewCodeResponse> {
+async fn new_code(State(state): State<AppState>) -> Result<Json<NewCodeResponse>, StatusCode> {
     let rooms = &state.rooms;
     let mut rng = rand::thread_rng();
-    loop {
+    for _ in 0..1000 {
         let code = generate_code(&mut rng);
         if let Entry::Vacant(v) = rooms.entry(code.clone()) {
             let (tx, _) = broadcast::channel(2048);
@@ -270,9 +280,11 @@ async fn new_code(State(state): State<AppState>) -> Json<NewCodeResponse> {
                 expires_at: Instant::now() + Duration::from_secs(CODE_TTL_SECS),
                 attempts: 0,
             });
-            return Json(NewCodeResponse { code });
+            return Ok(Json(NewCodeResponse { code }));
         }
     }
+    // 100k codes — hitting 1000 retries requires >99% occupancy; return 503 instead of looping forever
+    Err(StatusCode::SERVICE_UNAVAILABLE)
 }
 
 // 15.2 + 15.3 Check per-IP WS connect; record this attempt; escalate ban tiers if warranted.

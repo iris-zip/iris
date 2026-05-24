@@ -69,6 +69,11 @@
             </button>
         </div>
 
+        <div class="bm-qr-block">
+            <div id="qr-code" aria-hidden="true"></div>
+            <p class="bm-qr-label">Scan with your phone camera to join automatically</p>
+        </div>
+
         <hr class="bm-divider">
 
         <div id="wait-msg" class="bm-status-chip bm-status-chip--warn" role="status" aria-live="polite">
@@ -164,6 +169,7 @@
         <p class="bm-fatal-instruction">Close this tab and start a new session.</p>
     </div>
 
-    <script type="module" src="app.js" integrity="sha384-FvOXJLaiYz+/0WavYbEqeIorm37uC1MetoVje1UWOIjGGsII8zSzwx3V9Jez7qFG"></script>
+    <script src="qrcodegen.js" integrity="sha384-3zSEDfvllQohrq0PHL1fOXJuC/jSOO34H46t6UQfobFOmxE5BpjjaIJY5F2/bMnU"></script>
+    <script type="module" src="app.js" integrity="sha384-he/v3nn0bOh9b+plCopV13CaUy79D185f0xdkUwh89WE5qvOT3Pa8d1pMSFw0+MM"></script>
 </body>
 </html>

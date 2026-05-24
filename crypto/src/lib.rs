@@ -167,18 +167,19 @@ pub fn hkdf_combine(
 }
 
 #[wasm_bindgen]
-pub fn start_pake(code: &str, role: &str) -> PakeState {
+pub fn start_pake(code: &str, role: &str) -> Result<PakeState, JsError> {
     let password = Password::new(code.as_bytes());
     let id_a = Identity::new(b"A");
     let id_b = Identity::new(b"B");
     let (state, msg) = match role {
         "A" => Spake2::<Ed25519Group>::start_a(&password, &id_a, &id_b),
-        _ => Spake2::<Ed25519Group>::start_b(&password, &id_a, &id_b),
+        "B" => Spake2::<Ed25519Group>::start_b(&password, &id_a, &id_b),
+        _ => return Err(JsError::new("invalid role: must be \"A\" or \"B\"")),
     };
-    PakeState {
+    Ok(PakeState {
         inner: Some(state),
         first_msg: msg,
-    }
+    })
 }
 
 #[cfg(test)]
@@ -190,8 +191,8 @@ mod tests {
     // TEST-W-001 — PAKE success: same code → identical derived keys
     #[wasm_bindgen_test]
     fn test_pake_success() {
-        let pa = start_pake("12345", "A");
-        let pb = start_pake("12345", "B");
+        let pa = start_pake("12345", "A").unwrap();
+        let pb = start_pake("12345", "B").unwrap();
         let msg_a = pa.msg();
         let msg_b = pb.msg();
         let key_a = finish_pake(pa, &msg_b).unwrap();
@@ -203,8 +204,8 @@ mod tests {
     // TEST-W-002 — PAKE mismatch: different codes → keys must NOT match
     #[wasm_bindgen_test]
     fn test_pake_mismatch() {
-        let pa = start_pake("12345", "A");
-        let pb = start_pake("99999", "B");
+        let pa = start_pake("12345", "A").unwrap();
+        let pb = start_pake("99999", "B").unwrap();
         let msg_a = pa.msg();
         let msg_b = pb.msg();
         let key_a = finish_pake(pa, &msg_b).unwrap();
@@ -293,8 +294,8 @@ mod tests {
     #[wasm_bindgen_test]
     fn test_full_handshake_e2e() {
         // PAKE
-        let pa = start_pake("12345", "A");
-        let pb = start_pake("12345", "B");
+        let pa = start_pake("12345", "A").unwrap();
+        let pb = start_pake("12345", "B").unwrap();
         let msg_a = pa.msg();
         let msg_b = pb.msg();
         let pake_a = finish_pake(pa, &msg_b).unwrap();
