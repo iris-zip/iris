@@ -189,6 +189,12 @@ async function hashPrefix4(bytes) {
     return new Uint8Array(full, 0, 4);
 }
 
+async function fileChecksum(bytes) {
+    const digest = await crypto.subtle.digest("SHA-256", bytes);
+    return Array.from(new Uint8Array(digest, 0, 4))
+        .map(b => b.toString(16).padStart(2, "0")).join("");
+}
+
 function bytesEq(a, b) {
     if (a.length !== b.length) return false;
     let diff = 0;
@@ -255,8 +261,10 @@ let preCloseReason = "";
 // mode with the existing derivedKey + counters. Deadline is absolute (ms epoch)
 // so repeated reconnect attempts don't extend the total grace.
 const RESUME_GRACE_MS = 30_000;
+const SESSION_SECS = 5 * 60; // must match server MAX_SESSION_SECS
 let resumeUntil = 0;
 let wsKeepaliveTimer = null;
+let sessionTimer = null;
 let wakeLock = null;
 
 const COUNTER_MAX = (1n << 64n) - 1n;
@@ -340,27 +348,13 @@ async function startSender() {
             sp.textContent = digit;
             bc.appendChild(sp);
         }
-        renderQR(code);
         setWaitMsg("Waiting for peer\u2026", "warn");
         show("sender");
+        acquireWakeLock();
         openWs(code);
     } catch (e) {
         alert("Could not generate code: " + e.message);
     }
-}
-
-function renderQR(code) {
-    const el = $("qr-code");
-    if (!el || typeof QRCode === "undefined") return;
-    el.innerHTML = "";
-    new QRCode(el, {
-        text: `${location.origin}/#${code}`,
-        width: 160,
-        height: 160,
-        colorDark: "#000000",
-        colorLight: "#ffffff",
-        correctLevel: QRCode.CorrectLevel.L,
-    });
 }
 
 function joinAsReceiver() {
@@ -618,6 +612,7 @@ function enterChat(_code) {
     show("chat");
     $("chat-input").focus();
     startWsKeepalive();
+    startSessionTimer();
     acquireWakeLock();
 }
 
@@ -634,6 +629,26 @@ function startWsKeepalive() {
 
 function stopWsKeepalive() {
     if (wsKeepaliveTimer !== null) { clearInterval(wsKeepaliveTimer); wsKeepaliveTimer = null; }
+}
+
+function startSessionTimer() {
+    const el = $("session-timer");
+    if (!el) return;
+    let remaining = SESSION_SECS;
+    el.textContent = fmtMMSS(remaining);
+    el.hidden = false;
+    if (sessionTimer !== null) clearInterval(sessionTimer);
+    sessionTimer = setInterval(() => {
+        remaining -= 1;
+        el.textContent = fmtMMSS(Math.max(0, remaining));
+        if (remaining <= 0) { clearInterval(sessionTimer); sessionTimer = null; }
+    }, 1000);
+}
+
+function stopSessionTimer() {
+    if (sessionTimer !== null) { clearInterval(sessionTimer); sessionTimer = null; }
+    const el = $("session-timer");
+    if (el) el.hidden = true;
 }
 
 async function acquireWakeLock() {
@@ -689,6 +704,7 @@ function endChatSession() {
     step = null;
     useRTC = false;
     stopWsKeepalive();
+    stopSessionTimer();
     releaseWakeLock();
     if (dataChannel) { dataChannel.close(); dataChannel = null; }
     if (rtcPeer) { rtcPeer.close(); rtcPeer = null; }
@@ -991,6 +1007,10 @@ async function sendFile(file) {
     }
     sendPayload(T_FILE_END, new Uint8Array(0));
     completeFileRow(refs, file.size, "Sent");
+    try {
+        const cs = await fileChecksum(await file.arrayBuffer());
+        appendSystemMsg(`SHA-256: ${cs}`);
+    } catch (_) {}
 }
 
 // Receiver-side
@@ -1021,7 +1041,7 @@ function handleFileChunk(pt) {
     updateFileRow(recvFile.refs, recvFile.received, recvFile.size, "Receiving", bps);
 }
 
-function handleFileEnd() {
+async function handleFileEnd() {
     if (!recvFile) return;
     const f = recvFile;
     recvFile = null;
@@ -1041,14 +1061,10 @@ function handleFileEnd() {
     link.download = f.name;
     link.textContent = `Download \u00b7 ${fmtBytes(f.size)}`;
     f.refs.meta.appendChild(link);
+
+    try {
+        const cs = await fileChecksum(await blob.arrayBuffer());
+        appendSystemMsg(`SHA-256: ${cs}`);
+    } catch (_) {}
 }
 
-// Auto-receive: when a receiver scans the QR code the URL contains #DDDDD.
-// Pre-fill the code input and join immediately \u2014 no typing needed.
-if (/^#\d{5}$/.test(location.hash)) {
-    const code = location.hash.slice(1);
-    $("code-input").value = code;
-    clearRateBanners();
-    show("receiver");
-    joinAsReceiver();
-}

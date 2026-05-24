@@ -21,9 +21,8 @@ APP_JS="$CLIENT/app.js"
 INDEX="$CLIENT/index.html"
 CRYPTO_JS="$CLIENT/pkg/beem_crypto.js"
 CRYPTO_WASM="$CLIENT/pkg/beem_crypto_bg.wasm"
-QR_JS="$CLIENT/qrcodegen.js"
 
-for f in "$APP_JS" "$INDEX" "$CRYPTO_JS" "$CRYPTO_WASM" "$QR_JS"; do
+for f in "$APP_JS" "$INDEX" "$CRYPTO_JS" "$CRYPTO_WASM"; do
     [[ -f "$f" ]] || { echo "missing: $f" >&2; exit 1; }
 done
 
@@ -31,20 +30,11 @@ sha384_b64() {
     openssl dgst -sha384 -binary "$1" | openssl base64 -A
 }
 
-QR_JS_SRI="sha384-$(sha384_b64 "$QR_JS")"
 CRYPTO_JS_SRI="sha384-$(sha384_b64 "$CRYPTO_JS")"
 CRYPTO_WASM_SRI="sha384-$(sha384_b64 "$CRYPTO_WASM")"
 
-echo "qrcodegen.js $QR_JS_SRI"
-echo "crypto.js    $CRYPTO_JS_SRI"
-echo "crypto.wasm  $CRYPTO_WASM_SRI"
-
-# Inject qrcodegen.js SRI into index.html (tolerates placeholder or prior hash)
-sed -i -E \
-    "s|<script src=\"qrcodegen\.js\"( integrity=\"[^\"]*\")?></script>|<script src=\"qrcodegen.js\" integrity=\"$QR_JS_SRI\"></script>|" \
-    "$INDEX"
-
-grep -q "integrity=\"$QR_JS_SRI\"" "$INDEX" || { echo "failed to inject qrcodegen.js integrity" >&2; exit 1; }
+echo "crypto.js   $CRYPTO_JS_SRI"
+echo "crypto.wasm $CRYPTO_WASM_SRI"
 
 sed -i -E \
     -e "s|^const CRYPTO_JS_SRI   = \"[^\"]*\";|const CRYPTO_JS_SRI   = \"$CRYPTO_JS_SRI\";|" \
@@ -58,7 +48,7 @@ APP_JS_SRI="sha384-$(sha384_b64 "$APP_JS")"
 echo "app.js       $APP_JS_SRI"
 
 sed -i -E \
-    "s|<script type=\"module\" src=\"app\.js\"( integrity=\"[^\"]*\")?></script>|<script type=\"module\" src=\"app.js\" integrity=\"$APP_JS_SRI\"></script>|" \
+    "s|<script type=\"module\" src=\"app\.js\"( integrity=\"[^\"]*\")?></script>|<script type=\"module\" src=\"app.js\" integrity=\"$APP_JS_SRI\"></script>|g" \
     "$INDEX"
 
 grep -q "integrity=\"$APP_JS_SRI\"" "$INDEX" || { echo "failed to inject app.js integrity" >&2; exit 1; }
@@ -73,7 +63,6 @@ sha384_hex() {
     openssl dgst -sha384 "$1" | awk '{print $NF}'
 }
 APP_JS_HEX=$(sha384_hex "$APP_JS")
-QR_JS_HEX=$(sha384_hex "$QR_JS")
 CRYPTO_JS_HEX=$(sha384_hex "$CRYPTO_JS")
 CRYPTO_WASM_HEX=$(sha384_hex "$CRYPTO_WASM")
 GIT_SHORT=$(git rev-parse --short HEAD 2>/dev/null || echo "(no git)")
@@ -97,7 +86,6 @@ exact code in this git commit.
 | File | sha384 (hex) | sha384 (SRI / base64) |
 |---|---|---|
 | \`client/app.js\` | \`$APP_JS_HEX\` | \`$APP_JS_SRI\` |
-| \`client/qrcodegen.js\` | \`$QR_JS_HEX\` | \`$QR_JS_SRI\` |
 | \`client/pkg/beem_crypto.js\` | \`$CRYPTO_JS_HEX\` | \`$CRYPTO_JS_SRI\` |
 | \`client/pkg/beem_crypto_bg.wasm\` | \`$CRYPTO_WASM_HEX\` | \`$CRYPTO_WASM_SRI\` |
 

@@ -689,6 +689,15 @@ img, svg { display: block; max-width: 100%; }
   color: var(--fg-default);
 }
 
+.bm-session-timer {
+  font-family: var(--font-mono);
+  font-size: var(--t-label);
+  color: var(--fg-muted);
+  letter-spacing: 0.04em;
+  min-width: 2.8rem;
+  text-align: center;
+}
+
 /* Chat log */
 #chat-log {
   flex: 1;
@@ -961,24 +970,3 @@ img, svg { display: block; max-width: 100%; }
   border: none;
 }
 
-/* ── QR code block (sender screen) ─────────────────────────────── */
-.bm-qr-block {
-  display: flex;
-  flex-direction: column;
-  align-items: center;
-  gap: var(--sp-3);
-}
-
-.bm-qr-block canvas,
-.bm-qr-block img {
-  border-radius: var(--r-md);
-  display: block;
-}
-
-.bm-qr-label {
-  font-size: var(--t-label);
-  color: var(--fg-muted);
-  text-align: center;
-  max-width: 18rem;
-  line-height: 1.4;
-}

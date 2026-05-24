@@ -69,11 +69,6 @@
             </button>
         </div>
 
-        <div class="bm-qr-block">
-            <div id="qr-code" aria-hidden="true"></div>
-            <p class="bm-qr-label">Scan with your phone camera to join automatically</p>
-        </div>
-
         <hr class="bm-divider">
 
         <div id="wait-msg" class="bm-status-chip bm-status-chip--warn" role="status" aria-live="polite">
@@ -121,6 +116,7 @@
 
         <header id="chat-header">
             <span class="bm-chat-name">Beem</span>
+            <span id="session-timer" class="bm-session-timer" aria-label="Session time remaining" hidden></span>
             <div class="bm-status-chip bm-status-chip--ok" role="status" aria-live="polite">
                 <span class="bm-status-dot"></span>
                 <span>Connected</span>
@@ -169,7 +165,6 @@
         <p class="bm-fatal-instruction">Close this tab and start a new session.</p>
     </div>
 
-    <script src="qrcodegen.js" integrity="sha384-3zSEDfvllQohrq0PHL1fOXJuC/jSOO34H46t6UQfobFOmxE5BpjjaIJY5F2/bMnU"></script>
-    <script type="module" src="app.js" integrity="sha384-he/v3nn0bOh9b+plCopV13CaUy79D185f0xdkUwh89WE5qvOT3Pa8d1pMSFw0+MM"></script>
+    <script type="module" src="app.js" integrity="sha384-EoX6ApN6eVyWMiG2qAzeHy56Ilf/FSYkwYjc7ueS2OFe0ufZtIwGzZ7g8F+7M33e"></script>
 </body>
 </html>
