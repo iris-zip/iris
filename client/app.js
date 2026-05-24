@@ -208,6 +208,7 @@ const T_FILE_HDR  = 0x01;
 const T_FILE_CHK  = 0x02;
 const T_FILE_END  = 0x03;
 const T_KEEPALIVE = 0x04; // WS heartbeat during DC transfers — keeps tunnel alive, receiver silently ignores
+const T_BYE       = 0x05; // immediate vanish signal — peer calls endChatSession() without waiting for server grace
 // WebRTC signaling — travel over existing encrypted WS relay, no server changes needed
 const T_RTC_OFFER = 0x10;
 const T_RTC_ANSWER = 0x11;
@@ -294,6 +295,9 @@ $("btn-join").addEventListener("click", joinAsReceiver);
 $("code-input").addEventListener("keydown", (e) => {
     if (e.key === "Enter") joinAsReceiver();
 });
+$("code-input").addEventListener("input", () => {
+    if ($("code-input").value.length === 5) joinAsReceiver();
+});
 
 $("btn-chat-send").addEventListener("click", sendChat);
 $("chat-input").addEventListener("keydown", (e) => {
@@ -332,6 +336,21 @@ $("file-input").addEventListener("change", (e) => {
     e.target.value = "";
 });
 
+// Drag & drop — overlay approach prevents dragleave-on-child flicker
+$("view-chat").addEventListener("dragenter", (e) => {
+    if (step !== "chat" || !e.dataTransfer.types.includes("Files")) return;
+    e.preventDefault();
+    $("drop-overlay").hidden = false;
+});
+$("drop-overlay").addEventListener("dragover", (e) => e.preventDefault());
+$("drop-overlay").addEventListener("dragleave", () => { $("drop-overlay").hidden = true; });
+$("drop-overlay").addEventListener("drop", (e) => {
+    e.preventDefault();
+    $("drop-overlay").hidden = true;
+    const file = e.dataTransfer.files[0];
+    if (file) sendFile(file);
+});
+
 async function startSender() {
     try {
         const res = await fetch("/new", { method: "POST" });
@@ -356,6 +375,7 @@ async function startSender() {
 }
 
 function joinAsReceiver() {
+    if (ws && ws.readyState === WebSocket.CONNECTING) return;
     const code = $("code-input").value.trim();
     if (!/^\d{5}$/.test(code)) {
         $("receiver-error").textContent = "Please enter exactly 5 digits.";
@@ -607,6 +627,11 @@ function abort(reason) {
 function enterChat(_code) {
     $("chat-log").innerHTML = "";
     $("chat-input").value = "";
+    for (const id of ["chat-input", "btn-chat-send", "btn-file-pick"]) {
+        const el = $(id);
+        if (el) el.disabled = false;
+    }
+    setChatChip("ok", "Connected");
     show("chat");
     $("chat-input").focus();
     startWsKeepalive();
@@ -697,9 +722,11 @@ function endChatSession() {
     }
 }
 
-// One-tap panic: kill connection, zero crypto material, clear chat, return to landing.
-// Peer sees a normal disconnect — no indication of a panic wipe vs. closing the tab.
+// One-tap panic: signal peer immediately, kill connection, zero crypto material, clear chat.
+// T_BYE goes out before we nuke local state so the peer sees instant disconnect,
+// not the server's 30-second mobile-resume grace delay.
 function panicVanish() {
+    sendPayload(T_BYE, new Uint8Array(0)); // must be first — sendPayload checks step === "chat"
     aborted = true;
     step = null;
     useRTC = false;
@@ -709,13 +736,11 @@ function panicVanish() {
     try { dataChannel && dataChannel.close(); } catch (_) {}
     try { rtcPeer && rtcPeer.close(); } catch (_) {}
     ws = null; dataChannel = null; rtcPeer = null;
-    // Zero all key material
     derivedKey = pakeKey = xShared = xSk = xPk = null;
     mlDk = mlEk = pakeState = ownPakeMsg = myHash = null;
     sendCounterWS = sendCounterDC = 0n;
     recvCounterWS = recvCounterDC = -1n;
     role = currentCode = null;
-    // Clear UI state
     $("chat-log").innerHTML = "";
     $("chat-input").value = "";
     $("file-status").textContent = "";
@@ -879,7 +904,8 @@ function handleChatPayload(type, pt) {
         handleRTCSignal(type, pt);
         return;
     }
-    if (type === T_KEEPALIVE) return; // WS heartbeat — no-op on receiver
+    if (type === T_KEEPALIVE) return;
+    if (type === T_BYE) { endChatSession(); return; }
     appendSystemMsg(`(unknown frame type 0x${type.toString(16)})`);
 }
 
