@@ -261,10 +261,8 @@ let preCloseReason = "";
 // mode with the existing derivedKey + counters. Deadline is absolute (ms epoch)
 // so repeated reconnect attempts don't extend the total grace.
 const RESUME_GRACE_MS = 30_000;
-const SESSION_SECS = 5 * 60; // must match server MAX_SESSION_SECS
 let resumeUntil = 0;
 let wsKeepaliveTimer = null;
-let sessionTimer = null;
 let wakeLock = null;
 
 const COUNTER_MAX = (1n << 64n) - 1n;
@@ -612,7 +610,6 @@ function enterChat(_code) {
     show("chat");
     $("chat-input").focus();
     startWsKeepalive();
-    startSessionTimer();
     acquireWakeLock();
 }
 
@@ -629,26 +626,6 @@ function startWsKeepalive() {
 
 function stopWsKeepalive() {
     if (wsKeepaliveTimer !== null) { clearInterval(wsKeepaliveTimer); wsKeepaliveTimer = null; }
-}
-
-function startSessionTimer() {
-    const el = $("session-timer");
-    if (!el) return;
-    let remaining = SESSION_SECS;
-    el.textContent = fmtMMSS(remaining);
-    el.hidden = false;
-    if (sessionTimer !== null) clearInterval(sessionTimer);
-    sessionTimer = setInterval(() => {
-        remaining -= 1;
-        el.textContent = fmtMMSS(Math.max(0, remaining));
-        if (remaining <= 0) { clearInterval(sessionTimer); sessionTimer = null; }
-    }, 1000);
-}
-
-function stopSessionTimer() {
-    if (sessionTimer !== null) { clearInterval(sessionTimer); sessionTimer = null; }
-    const el = $("session-timer");
-    if (el) el.hidden = true;
 }
 
 async function acquireWakeLock() {
@@ -704,7 +681,6 @@ function endChatSession() {
     step = null;
     useRTC = false;
     stopWsKeepalive();
-    stopSessionTimer();
     releaseWakeLock();
     if (dataChannel) { dataChannel.close(); dataChannel = null; }
     if (rtcPeer) { rtcPeer.close(); rtcPeer = null; }
@@ -720,6 +696,37 @@ function endChatSession() {
         if (label) label.textContent = "Disconnected";
     }
 }
+
+// One-tap panic: kill connection, zero crypto material, clear chat, return to landing.
+// Peer sees a normal disconnect — no indication of a panic wipe vs. closing the tab.
+function panicVanish() {
+    aborted = true;
+    step = null;
+    useRTC = false;
+    stopWsKeepalive();
+    releaseWakeLock();
+    try { ws && ws.close(); } catch (_) {}
+    try { dataChannel && dataChannel.close(); } catch (_) {}
+    try { rtcPeer && rtcPeer.close(); } catch (_) {}
+    ws = null; dataChannel = null; rtcPeer = null;
+    // Zero all key material
+    derivedKey = pakeKey = xShared = xSk = xPk = null;
+    mlDk = mlEk = pakeState = ownPakeMsg = myHash = null;
+    sendCounterWS = sendCounterDC = 0n;
+    recvCounterWS = recvCounterDC = -1n;
+    role = currentCode = null;
+    // Clear UI state
+    $("chat-log").innerHTML = "";
+    $("chat-input").value = "";
+    $("file-status").textContent = "";
+    for (const id of ["chat-input", "btn-chat-send", "btn-file-pick"]) {
+        const el = $(id);
+        if (el) el.disabled = false;
+    }
+    show("landing");
+}
+
+$("btn-vanish").addEventListener("click", panicVanish);
 
 // ---- WebRTC direct path ----
 // Signaling travels over the existing encrypted WS relay (T_RTC_* frames).

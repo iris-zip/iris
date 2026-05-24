@@ -27,7 +27,7 @@ use tower_governor::{governor::GovernorConfigBuilder, GovernorLayer};
 use tower_http::{services::ServeDir, set_header::SetResponseHeaderLayer};
 
 const CODE_TTL_SECS: u64 = 60;
-const MAX_SESSION_SECS: u64 = 5 * 60;
+const MAX_SESSION_SECS: u64 = 60 * 60;
 const MAX_WS_FRAME: usize = 128 * 1024; // per-frame cap; chat + 64KB chunk + overhead
 
 // 15.2 + 15.11 Per-IP WS connect rate limit.

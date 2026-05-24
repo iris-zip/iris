@@ -689,14 +689,26 @@ img, svg { display: block; max-width: 100%; }
   color: var(--fg-default);
 }
 
-.bm-session-timer {
-  font-family: var(--font-mono);
-  font-size: var(--t-label);
-  color: var(--fg-muted);
-  letter-spacing: 0.04em;
-  min-width: 2.8rem;
-  text-align: center;
+.bm-vanish-btn {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 2rem;
+  height: 2rem;
+  border-radius: var(--r-full);
+  border: 1px solid transparent;
+  background: transparent;
+  color: var(--fg-subtle);
+  cursor: pointer;
+  flex-shrink: 0;
+  transition: background 0.15s, color 0.15s, border-color 0.15s;
 }
+.bm-vanish-btn:hover {
+  background: var(--status-err-bg);
+  color: var(--status-err);
+  border-color: rgba(196, 42, 42, 0.2);
+}
+.bm-vanish-btn:active { opacity: 0.7; }
 
 /* Chat log */
 #chat-log {
