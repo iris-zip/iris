@@ -149,17 +149,19 @@ pub fn mlkem_decaps(dk_bytes: &[u8], ct_bytes: &[u8]) -> Result<Vec<u8>, JsError
 }
 
 // ---- HKDF-SHA256 combiner ----
+// transcript = xPkA ‖ xPkB ‖ mlEk ‖ mlCt — binds all public handshake material into the salt
 #[wasm_bindgen]
 pub fn hkdf_combine(
     pake_key: &[u8],
     x_shared: &[u8],
     kem_shared: &[u8],
+    transcript: &[u8],
 ) -> Result<Vec<u8>, JsError> {
     let mut ikm = Vec::with_capacity(pake_key.len() + x_shared.len() + kem_shared.len());
     ikm.extend_from_slice(pake_key);
     ikm.extend_from_slice(x_shared);
     ikm.extend_from_slice(kem_shared);
-    let hk = Hkdf::<Sha256>::new(None, &ikm);
+    let hk = Hkdf::<Sha256>::new(Some(transcript), &ikm);
     let mut out = [0u8; 32];
     hk.expand(b"beem-v1 aead", &mut out)
         .map_err(|e| JsError::new(&format!("hkdf: {:?}", e)))?;
@@ -253,13 +255,17 @@ mod tests {
         let pake = vec![1u8; 32];
         let x    = vec![2u8; 32];
         let kem  = vec![3u8; 32];
-        let out1 = hkdf_combine(&pake, &x, &kem).unwrap();
+        let tr   = vec![4u8; 64]; // dummy transcript (xPkA ‖ xPkB)
+        let out1 = hkdf_combine(&pake, &x, &kem, &tr).unwrap();
         assert_eq!(out1.len(), 32);
         for _ in 0..100 {
-            assert_eq!(hkdf_combine(&pake, &x, &kem).unwrap(), out1);
+            assert_eq!(hkdf_combine(&pake, &x, &kem, &tr).unwrap(), out1);
         }
-        let out2 = hkdf_combine(&[0u8; 32], &x, &kem).unwrap();
+        let out2 = hkdf_combine(&[0u8; 32], &x, &kem, &tr).unwrap();
         assert_ne!(out1, out2, "different inputs must produce different output");
+        // transcript binding: same secrets + different transcript → different key
+        let out3 = hkdf_combine(&pake, &x, &kem, &vec![0u8; 64]).unwrap();
+        assert_ne!(out1, out3, "different transcript must produce different key");
     }
 
     // TEST-W-007 — X25519 shared-secret agreement
@@ -317,9 +323,14 @@ mod tests {
         let kem_b     = &enc_out[enc_out.len() - 32..]; // B's view of shared secret
         let kem_a     = mlkem_decaps(dk_a, ct).unwrap(); // A decapsulates
 
-        // HKDF combine on both sides
-        let derived_a = hkdf_combine(&pake_a, &x_shared_a, &kem_a).unwrap();
-        let derived_b = hkdf_combine(&pake_b, &x_shared_b, kem_b).unwrap();
+        // HKDF combine on both sides — transcript = xPkA ‖ xPkB ‖ mlEk ‖ mlCt
+        let mut tr = Vec::new();
+        tr.extend_from_slice(&kp_a[32..]); // xPkA (sender)
+        tr.extend_from_slice(&kp_b[32..]); // xPkB (receiver)
+        tr.extend_from_slice(ek_a);
+        tr.extend_from_slice(ct);
+        let derived_a = hkdf_combine(&pake_a, &x_shared_a, &kem_a, &tr).unwrap();
+        let derived_b = hkdf_combine(&pake_b, &x_shared_b, kem_b,  &tr).unwrap();
 
         assert_eq!(derived_a, derived_b, "full handshake must produce equal keys on both sides");
         assert_eq!(derived_a.len(), 32);

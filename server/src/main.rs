@@ -573,7 +573,10 @@ async fn pair(mut socket: WebSocket, code: String, rooms: Rooms, session_secs: u
                             if socket.send(msg).await.is_err() { break; }
                         }
                     }
-                    Err(broadcast::error::RecvError::Lagged(_)) => break,
+                    Err(broadcast::error::RecvError::Lagged(n)) => {
+                        eprintln!("[relay] broadcast lagged {} frames — receiver too slow, closing WS", n);
+                        break;
+                    }
                     Err(_) => break,
                 }
             }

@@ -1,7 +1,7 @@
 // 15.4 SRI — placeholders rewritten by scripts/build-sri.sh on release build.
 // Until rewritten, runtime check short-circuits with a dev-mode warning.
-const CRYPTO_JS_SRI   = "sha384-m16i4fI+hLiDvPJHHgc6vq3lVxSNAaS7fGBtLldXNlHw3G76rMCw66Ik1zr7e3E4";
-const CRYPTO_WASM_SRI = "sha384-v16TDqD88M0wwl/J+vJe7zkl9YuLwkZzGKsmins/VidwyD9A4833ebr2+Ru12D9i";
+const CRYPTO_JS_SRI   = "sha384-w4B5QKoT0lGRKS/LLtYyL+ri7UGB4B/q+tmLGOwejB1/amGa9LXVPgeaQnAguxkL";
+const CRYPTO_WASM_SRI = "sha384-BojxB1QWj78IMYKDjPOb3FCgO/zc/WvRFVJQyDuIsSG5U1ckTh+ksjcEXWabH0pe";
 const SRI_PLACEHOLDER_PREFIX = "__SRI_";
 
 async function sha384Base64(buf) {
@@ -210,6 +210,7 @@ const T_FILE_END  = 0x03;
 const T_KEEPALIVE = 0x04; // WS heartbeat during DC transfers — keeps tunnel alive, receiver silently ignores
 const T_BYE       = 0x05; // immediate vanish signal — peer calls endChatSession() without waiting for server grace
 const T_FILE_NACK = 0x06; // missing chunk indices (uint32 BE each) — receiver→sender retransmit request
+const T_FILE_ACK  = 0x07; // chunk receipt acknowledgement — receiver→sender, one per chunk over WS relay
 // WebRTC signaling — travel over existing encrypted WS relay, no server changes needed
 const T_RTC_OFFER = 0x10;
 const T_RTC_ANSWER = 0x11;
@@ -232,6 +233,7 @@ let currentCode = null;
 let pakeState = null;
 let ownPakeMsg = null;   // sender only
 let xSk = null, xPk = null;
+let rxXPk = null; // receiver's X25519 pk, saved by sender during await-rx-info for transcript
 let mlDk = null, mlEk = null; // sender only
 let pakeKey = null;
 let xShared = null;
@@ -415,6 +417,7 @@ function openWs(code, resume = false) {
         sendCounterDC = 0n;
         recvCounterWS = -1n;
         recvCounterDC = -1n;
+        drainAckWaiters();
     }
     preCloseCode = 0;
     preCloseReason = "";
@@ -493,6 +496,7 @@ function openWs(code, resume = false) {
             if (buf.length !== RX_INFO_LEN) { abort("Handshake failed (size)."); return; }
             const peerPake = buf.slice(0, PAKE_MSG_LEN);
             const peerXPk  = buf.slice(PAKE_MSG_LEN, RX_INFO_LEN);
+            rxXPk = peerXPk; // save for HKDF transcript
             try { pakeKey = finish_pake(pakeState, peerPake); }
             catch (_) { abort("Pairing failed."); return; }
             pakeState = null;
@@ -513,7 +517,14 @@ function openWs(code, resume = false) {
             let kemSs;
             try { kemSs = mlkem_decaps(mlDk, buf); }
             catch (_) { abort("ML-KEM decaps failed."); return; }
-            try { derivedKey = hkdf_combine(pakeKey, xShared, kemSs); }
+            // transcript = xPkA(sender) ‖ xPkB(receiver) ‖ mlEk ‖ mlCt
+            const tr = new Uint8Array(xPk.length + rxXPk.length + mlEk.length + buf.length);
+            let off = 0;
+            tr.set(xPk,   off); off += xPk.length;
+            tr.set(rxXPk, off); off += rxXPk.length;
+            tr.set(mlEk,  off); off += mlEk.length;
+            tr.set(buf,   off);
+            try { derivedKey = hkdf_combine(pakeKey, xShared, kemSs, tr); }
             catch (_) { abort("HKDF failed."); return; }
             myHash = await hashPrefix4(derivedKey);
             ws.send(myHash);
@@ -537,7 +548,14 @@ function openWs(code, resume = false) {
             catch (_) { abort("ML-KEM encaps failed."); return; }
             const kemCt = encapsOut.slice(0, MLKEM_CT_LEN);
             const kemSs = encapsOut.slice(MLKEM_CT_LEN, MLKEM_CT_LEN + MLKEM_SS_LEN);
-            try { derivedKey = hkdf_combine(pakeKey, xShared, kemSs); }
+            // transcript = xPkA(sender) ‖ xPkB(receiver) ‖ mlEk ‖ mlCt — must match sender side
+            const tr = new Uint8Array(peerXPk.length + xPk.length + peerEk.length + kemCt.length);
+            let off = 0;
+            tr.set(peerXPk, off); off += peerXPk.length;
+            tr.set(xPk,     off); off += xPk.length;
+            tr.set(peerEk,  off); off += peerEk.length;
+            tr.set(kemCt,   off);
+            try { derivedKey = hkdf_combine(pakeKey, xShared, kemSs, tr); }
             catch (_) { abort("HKDF failed."); return; }
 
             ws.send(kemCt);
@@ -723,6 +741,7 @@ function attemptResume() {
 function endChatSession() {
     step = null;
     useRTC = false;
+    drainAckWaiters(); // unblock any sendFile/handleFileNack loop waiting on ACK
     stopWsKeepalive();
     releaseWakeLock();
     if (dataChannel) { dataChannel.close(); dataChannel = null; }
@@ -753,6 +772,7 @@ function _doVanish() {
     aborted = true;
     step = null;
     useRTC = false;
+    drainAckWaiters();
     stopWsKeepalive();
     releaseWakeLock();
     try { ws && ws.close(); } catch (_) {}
@@ -930,6 +950,7 @@ function handleChatPayload(type, pt) {
         return;
     }
     if (type === T_FILE_NACK) { handleFileNack(pt); return; }
+    if (type === T_FILE_ACK)  { ackReceived(); return; }
     if (type === T_KEEPALIVE) return;
     if (type === T_BYE) { endChatSession(); return; }
     appendSystemMsg(`(unknown frame type 0x${type.toString(16)})`);
@@ -1049,12 +1070,21 @@ async function sendFile(file) {
         sentBytes += buf.length;
         const now = Date.now();
         speedSamples.push([now, buf.length]);
-        // Backpressure: WS relay needs tight cap to avoid overflowing broadcast channel.
-        // DataChannel has SCTP congestion control — use a loose cap just to avoid OOM.
-        const bufTarget = (useRTC && dataChannel) ? dataChannel : ws;
-        const bufCap = useRTC ? 8 * 1024 * 1024 : MAX_WS_BUFFER;
-        while (bufTarget && bufTarget.bufferedAmount > bufCap) {
-            await new Promise(r => setTimeout(r, 10));
+        // Backpressure — two separate mechanisms for two separate paths:
+        // WS relay: ACK-window. Receiver sends T_FILE_ACK after each chunk.
+        //   Sender waits here when ACK_WINDOW chunks are already in flight.
+        //   This caps the server broadcast ring buffer and paces sender to receiver speed.
+        // DC (P2P/LAN): SCTP congestion control handles it; just cap OOM risk.
+        const chunkViaDC = useRTC && dataChannel?.readyState === "open";
+        if (chunkViaDC) {
+            while (dataChannel.bufferedAmount > 8 * 1024 * 1024) {
+                await new Promise(r => setTimeout(r, 10));
+            }
+        } else {
+            wsChunksInFlight++;
+            if (wsChunksInFlight >= ACK_WINDOW) {
+                await new Promise(r => ackResolvers.push(r));
+            }
         }
         if ((i & 0x0f) === 0 || i === totalChunks - 1) {
             const t = Date.now();
@@ -1071,6 +1101,25 @@ async function sendFile(file) {
         const cs = await fileChecksum(await file.arrayBuffer());
         appendSystemMsg(`SHA-256: ${cs}`);
     } catch (_) {}
+}
+
+// WS relay ACK-window flow control.
+// Sender tracks how many chunks are in-flight (sent but not yet ACKed by receiver).
+// When in-flight hits ACK_WINDOW the sender suspends until an ACK arrives, keeping
+// the server's broadcast ring buffer well under its 2048-frame limit regardless of
+// how much faster the sender is than the receiver.
+const ACK_WINDOW = 32; // max chunks in flight over WS relay (~4 MB)
+let wsChunksInFlight = 0;
+let ackResolvers = []; // queue of resolve functions waiting for an ACK
+
+function ackReceived() {
+    wsChunksInFlight = Math.max(0, wsChunksInFlight - 1);
+    if (ackResolvers.length > 0) ackResolvers.shift()();
+}
+
+function drainAckWaiters() {
+    wsChunksInFlight = 0;
+    ackResolvers.splice(0).forEach(r => r());
 }
 
 // Receiver-side
@@ -1097,6 +1146,9 @@ function handleFileChunk(pt) {
     if (recvFile.parts[idx] !== undefined) return; // duplicate from retransmit — already counted
     recvFile.parts[idx] = data;
     recvFile.received += data.length;
+    // ACK every chunk over WS relay so the sender's flow-control window advances.
+    // Tiny frame (encrypted ~29B) — negligible overhead.
+    sendPayload(T_FILE_ACK, new Uint8Array(0));
     const t = Date.now();
     recvFile.speedSamples.push([t, data.length]);
     recvFile.speedSamples = recvFile.speedSamples.filter(s => t - s[0] <= 1000);
@@ -1165,9 +1217,15 @@ async function handleFileNack(pt) {
         new DataView(payload.buffer).setUint32(0, idx, false);
         payload.set(buf, 4);
         if (!sendPayload(T_FILE_CHK, payload)) return;
-        if (!useRTC) {
-            while (ws && ws.bufferedAmount > MAX_WS_BUFFER) {
+        const retxViaDC = useRTC && dataChannel?.readyState === "open";
+        if (retxViaDC) {
+            while (dataChannel.bufferedAmount > 8 * 1024 * 1024) {
                 await new Promise(r => setTimeout(r, 10));
+            }
+        } else {
+            wsChunksInFlight++;
+            if (wsChunksInFlight >= ACK_WINDOW) {
+                await new Promise(r => ackResolvers.push(r));
             }
         }
     }
