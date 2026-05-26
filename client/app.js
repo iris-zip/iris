@@ -1,7 +1,7 @@
 // 15.4 SRI — placeholders rewritten by scripts/build-sri.sh on release build.
 // Until rewritten, runtime check short-circuits with a dev-mode warning.
-const CRYPTO_JS_SRI   = "sha384-Gr1tIk6pjzHVcntswXBnWZeOXLzDS1Y8NzHVuSkMxWBhmgoBUcObzqCCnc3Mn3X/";
-const CRYPTO_WASM_SRI = "sha384-BE4nNT06p5plJQONMwILJkvOZBdaICB5MZv4W/lOsbXOcjJh+97h2vT6/Ek6XiMQ";
+const CRYPTO_JS_SRI   = "sha384-m16i4fI+hLiDvPJHHgc6vq3lVxSNAaS7fGBtLldXNlHw3G76rMCw66Ik1zr7e3E4";
+const CRYPTO_WASM_SRI = "sha384-v16TDqD88M0wwl/J+vJe7zkl9YuLwkZzGKsmins/VidwyD9A4833ebr2+Ru12D9i";
 const SRI_PLACEHOLDER_PREFIX = "__SRI_";
 
 async function sha384Base64(buf) {
@@ -191,7 +191,7 @@ async function hashPrefix4(bytes) {
 
 async function fileChecksum(bytes) {
     const digest = await crypto.subtle.digest("SHA-256", bytes);
-    return Array.from(new Uint8Array(digest, 0, 4))
+    return Array.from(new Uint8Array(digest))
         .map(b => b.toString(16).padStart(2, "0")).join("");
 }
 
@@ -209,6 +209,7 @@ const T_FILE_CHK  = 0x02;
 const T_FILE_END  = 0x03;
 const T_KEEPALIVE = 0x04; // WS heartbeat during DC transfers — keeps tunnel alive, receiver silently ignores
 const T_BYE       = 0x05; // immediate vanish signal — peer calls endChatSession() without waiting for server grace
+const T_FILE_NACK = 0x06; // missing chunk indices (uint32 BE each) — receiver→sender retransmit request
 // WebRTC signaling — travel over existing encrypted WS relay, no server changes needed
 const T_RTC_OFFER = 0x10;
 const T_RTC_ANSWER = 0x11;
@@ -336,6 +337,20 @@ $("file-input").addEventListener("change", (e) => {
     e.target.value = "";
 });
 
+// Clipboard paste — intercept only when clipboard contains a file (screenshot, copied file).
+// Text pastes fall through untouched to the textarea.
+document.addEventListener("paste", (e) => {
+    if (step !== "chat") return;
+    const items = e.clipboardData && e.clipboardData.items;
+    if (!items) return;
+    for (const item of items) {
+        if (item.kind === "file") {
+            const file = item.getAsFile();
+            if (file) { e.preventDefault(); sendFile(file); return; }
+        }
+    }
+});
+
 // Drag & drop — overlay approach prevents dragleave-on-child flicker
 $("view-chat").addEventListener("dragenter", (e) => {
     if (step !== "chat" || !e.dataTransfer.types.includes("Files")) return;
@@ -370,7 +385,7 @@ async function startSender() {
         acquireWakeLock();
         openWs(code);
     } catch (e) {
-        alert("Could not generate code: " + e.message);
+        showFatalView("Could not start session", e && e.message ? e.message : "Failed to generate pairing code.");
     }
 }
 
@@ -579,7 +594,7 @@ function openWs(code, resume = false) {
             } else if (code === CLOSE.SESSION_TIMEOUT) {
                 $("receiver-error").textContent = "Session time limit reached.";
             } else {
-                $("receiver-error").textContent = `Connection lost (code=${code}). Please try again.`;
+                $("receiver-error").textContent = "Connection lost. Please try again.";
             }
             show("receiver");
         } else {
@@ -597,7 +612,7 @@ function openWs(code, resume = false) {
             } else if (code === CLOSE.SESSION_TIMEOUT) {
                 txt = "Session time limit reached.";
             } else {
-                txt = `Connection lost (code=${code}). Please try again.`;
+                txt = "Connection lost. Please try again.";
             }
             setWaitMsg(txt, "err");
         }
@@ -608,7 +623,7 @@ function openWs(code, resume = false) {
         // Pre-chat WS error (network drop, server unreachable). Unrecoverable
         // for this session — surface the fatal view instead of inline text.
         aborted = true;
-        showFatalView();
+        showFatalView("Could not connect", "Server unreachable or network error. Nothing was sent.");
     });
 }
 
@@ -631,6 +646,7 @@ function enterChat(_code) {
         const el = $(id);
         if (el) el.disabled = false;
     }
+    $("btn-vanish").classList.remove("bm-vanish-btn--killing");
     setChatChip("ok", "Connected");
     show("chat");
     $("chat-input").focus();
@@ -643,9 +659,7 @@ function enterChat(_code) {
 function startWsKeepalive() {
     if (wsKeepaliveTimer !== null) clearInterval(wsKeepaliveTimer);
     wsKeepaliveTimer = setInterval(() => {
-        if (step === "chat" && useRTC && dataChannel?.readyState === "open") {
-            sendPayload(T_KEEPALIVE, new Uint8Array(0));
-        }
+        if (step === "chat") sendPayload(T_KEEPALIVE, new Uint8Array(0));
     }, 20_000);
 }
 
@@ -657,21 +671,25 @@ async function acquireWakeLock() {
     if (!("wakeLock" in navigator)) return;
     try {
         wakeLock = await navigator.wakeLock.request("screen");
-        // OS releases wake lock automatically when tab is hidden — reacquire on visibility restore
-        document.addEventListener("visibilitychange", onVisibilityChange);
+        // OS can release the lock at any time (battery saver, background) — reacquire immediately
+        wakeLock.addEventListener("release", () => {
+            wakeLock = null;
+            if (step === "chat" && document.visibilityState === "visible") acquireWakeLock();
+        });
     } catch (_) {}
 }
 
 function releaseWakeLock() {
-    document.removeEventListener("visibilitychange", onVisibilityChange);
     if (wakeLock) { wakeLock.release(); wakeLock = null; }
 }
 
-async function onVisibilityChange() {
-    if (document.visibilityState === "visible" && step === "chat" && wakeLock === null) {
-        await acquireWakeLock();
-    }
-}
+// Registered once — handles tab restore after screen lock / app switch
+document.addEventListener("visibilitychange", async () => {
+    if (document.visibilityState !== "visible" || step !== "chat") return;
+    if (wakeLock === null) await acquireWakeLock();
+    // WS dies silently while screen is off — detect and reconnect immediately on unlock
+    if (!ws || ws.readyState !== WebSocket.OPEN) attemptResume();
+});
 
 // Update the chat-header status chip without rewriting its DOM structure.
 function setChatChip(tone, text) {
@@ -727,6 +745,11 @@ function endChatSession() {
 // not the server's 30-second mobile-resume grace delay.
 function panicVanish() {
     sendPayload(T_BYE, new Uint8Array(0)); // must be first — sendPayload checks step === "chat"
+    const btn = $("btn-vanish");
+    btn.classList.add("bm-vanish-btn--killing");
+    setTimeout(_doVanish, 350);
+}
+function _doVanish() {
     aborted = true;
     step = null;
     useRTC = false;
@@ -760,7 +783,9 @@ $("btn-vanish").addEventListener("click", panicVanish);
 
 function setupWebRTC() {
     if (typeof RTCPeerConnection === "undefined") return;
-    const cfg = { iceServers: [{ urls: "stun:stun.l.google.com:19302" }] };
+    const cfg = { iceServers: [
+        { urls: "stun:stun.l.google.com:19302" }
+    ]};
     rtcPeer = new RTCPeerConnection(cfg);
 
     rtcPeer.onicecandidate = (e) => {
@@ -805,7 +830,7 @@ function wireDataChannel(dc) {
         } catch (_) {}
         appendSystemMsg(`${label} connection — server bypassed`);
     };
-    dc.onclose = () => { useRTC = false; };
+    dc.onclose = () => { useRTC = false; if (step === "chat") appendSystemMsg("(direct connection closed — fell back to relay)"); };
     dc.onerror = () => { useRTC = false; };
     dc.onmessage = (e) => {
         if (!(e.data instanceof ArrayBuffer)) return;
@@ -904,6 +929,7 @@ function handleChatPayload(type, pt) {
         handleRTCSignal(type, pt);
         return;
     }
+    if (type === T_FILE_NACK) { handleFileNack(pt); return; }
     if (type === T_KEEPALIVE) return;
     if (type === T_BYE) { endChatSession(); return; }
     appendSystemMsg(`(unknown frame type 0x${type.toString(16)})`);
@@ -1038,6 +1064,7 @@ async function sendFile(file) {
             await new Promise(r => setTimeout(r, 0));
         }
     }
+    lastSentFile = file; // held so handleFileNack can re-read slices on retransmit request
     sendPayload(T_FILE_END, new Uint8Array(0));
     completeFileRow(refs, file.size, "Sent");
     try {
@@ -1047,7 +1074,9 @@ async function sendFile(file) {
 }
 
 // Receiver-side
-let recvFile = null; // { name, size, parts: Uint8Array[], received: number, refs }
+let recvFile = null; // { name, size, totalChunks, nackAttempts, parts: Uint8Array[], received: number, refs }
+// Sender-side: held after sendFile completes so handleFileNack can re-read slices
+let lastSentFile = null;
 
 function handleFileHdr(pt) {
     if (pt.length < 10) { appendSystemMsg("(bad file header)"); return; }
@@ -1057,7 +1086,7 @@ function handleFileHdr(pt) {
     if (pt.length !== 10 + nameLen) { appendSystemMsg("(bad file header)"); return; }
     const name = textDec.decode(pt.slice(10, 10 + nameLen));
     const refs = appendFileRow(name, size, "in");
-    recvFile = { name, size, parts: [], received: 0, refs, speedSamples: [] };
+    recvFile = { name, size, totalChunks: Math.max(1, Math.ceil(size / CHUNK_SIZE)), nackAttempts: 0, parts: [], received: 0, refs, speedSamples: [] };
 }
 
 function handleFileChunk(pt) {
@@ -1065,6 +1094,7 @@ function handleFileChunk(pt) {
     if (pt.length < 4) return;
     const idx = new DataView(pt.buffer, pt.byteOffset, pt.byteLength).getUint32(0, false);
     const data = pt.slice(4);
+    if (recvFile.parts[idx] !== undefined) return; // duplicate from retransmit — already counted
     recvFile.parts[idx] = data;
     recvFile.received += data.length;
     const t = Date.now();
@@ -1077,6 +1107,22 @@ function handleFileChunk(pt) {
 async function handleFileEnd() {
     if (!recvFile) return;
     const f = recvFile;
+    if (f.received !== f.size && f.nackAttempts < 3 && step === "chat") {
+        const missing = [];
+        for (let i = 0; i < f.totalChunks; i++) {
+            if (f.parts[i] === undefined) missing.push(i);
+        }
+        if (missing.length > 0) {
+            f.nackAttempts++;
+            // Keep recvFile alive \u2014 retransmitted chunks + new T_FILE_END will arrive
+            const nackBuf = new Uint8Array(missing.length * 4);
+            const dv = new DataView(nackBuf.buffer);
+            missing.forEach((chunkIdx, i) => dv.setUint32(i * 4, chunkIdx, false));
+            sendPayload(T_FILE_NACK, nackBuf);
+            appendSystemMsg(`(requesting ${missing.length} missing chunk${missing.length === 1 ? "" : "s"}\u2026)`);
+            return;
+        }
+    }
     recvFile = null;
     if (f.received !== f.size) {
         failFileRow(f.refs, `Incomplete \u00b7 ${fmtBytes(f.received)} / ${fmtBytes(f.size)}`);
@@ -1093,11 +1139,38 @@ async function handleFileEnd() {
     link.href = url;
     link.download = f.name;
     link.textContent = `Download \u00b7 ${fmtBytes(f.size)}`;
+    link.addEventListener("click", () => setTimeout(() => URL.revokeObjectURL(url), 100));
     f.refs.meta.appendChild(link);
 
     try {
         const cs = await fileChecksum(await blob.arrayBuffer());
         appendSystemMsg(`SHA-256: ${cs}`);
     } catch (_) {}
+}
+
+// Sender-side: receiver asked us to re-send specific chunks.
+// Reads only the requested slices from the original File object and re-sends them,
+// then fires T_FILE_END so the receiver can try assembly again.
+async function handleFileNack(pt) {
+    if (!lastSentFile || pt.length % 4 !== 0 || pt.length === 0) return;
+    const count = pt.length / 4;
+    const dv = new DataView(pt.buffer, pt.byteOffset, pt.byteLength);
+    for (let j = 0; j < count; j++) {
+        if (step !== "chat") return;
+        const idx = dv.getUint32(j * 4, false);
+        const offset = idx * CHUNK_SIZE;
+        const slice = lastSentFile.slice(offset, Math.min(lastSentFile.size, offset + CHUNK_SIZE));
+        const buf = new Uint8Array(await slice.arrayBuffer());
+        const payload = new Uint8Array(4 + buf.length);
+        new DataView(payload.buffer).setUint32(0, idx, false);
+        payload.set(buf, 4);
+        if (!sendPayload(T_FILE_CHK, payload)) return;
+        if (!useRTC) {
+            while (ws && ws.bufferedAmount > MAX_WS_BUFFER) {
+                await new Promise(r => setTimeout(r, 10));
+            }
+        }
+    }
+    sendPayload(T_FILE_END, new Uint8Array(0));
 }
 

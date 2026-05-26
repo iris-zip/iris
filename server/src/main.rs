@@ -28,7 +28,7 @@ use tower_http::{services::ServeDir, set_header::SetResponseHeaderLayer};
 
 const CODE_TTL_SECS: u64 = 60;
 const MAX_SESSION_SECS: u64 = 60 * 60;
-const MAX_WS_FRAME: usize = 128 * 1024; // per-frame cap; chat + 64KB chunk + overhead
+const MAX_WS_FRAME: usize = 200 * 1024; // 128KB chunk + 33B crypto overhead + margin
 
 // 15.2 + 15.11 Per-IP WS connect rate limit.
 // Cooldown softened to 30s (was 300s): per-IP is volumetric-abuse defense only.
