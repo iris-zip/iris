@@ -184,9 +184,9 @@ function setWaitMsg(text, tone) {
     if (label) label.textContent = text;
 }
 
-async function hashPrefix4(bytes) {
+async function hashPrefix16(bytes) {
     const full = await crypto.subtle.digest("SHA-256", bytes);
-    return new Uint8Array(full, 0, 4);
+    return new Uint8Array(full, 0, 16);
 }
 
 async function fileChecksum(bytes) {
@@ -526,7 +526,7 @@ function openWs(code, resume = false) {
             tr.set(buf,   off);
             try { derivedKey = hkdf_combine(pakeKey, xShared, kemSs, tr); }
             catch (_) { abort("HKDF failed."); return; }
-            myHash = await hashPrefix4(derivedKey);
+            myHash = await hashPrefix16(derivedKey);
             ws.send(myHash);
             step = "await-hash";
             return;
@@ -559,7 +559,7 @@ function openWs(code, resume = false) {
             catch (_) { abort("HKDF failed."); return; }
 
             ws.send(kemCt);
-            myHash = await hashPrefix4(derivedKey);
+            myHash = await hashPrefix16(derivedKey);
             ws.send(myHash);
             step = "await-hash";
             return;
