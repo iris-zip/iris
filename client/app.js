@@ -285,6 +285,32 @@ function makeNonce(counter, transport = 0) {
 const textEnc = new TextEncoder();
 const textDec = new TextDecoder();
 
+// Directional AEAD key separation — fixes bidirectional nonce reuse.
+// Both peers derive the SAME combined secret `derivedKey`. The nonce is built only
+// from (counter, transport), so without a per-direction split the sender and the
+// receiver would both start at counter 0 and encrypt different plaintexts under the
+// identical (key, nonce) pair — catastrophic for ChaCha20-Poly1305 (keystream reuse
+// + Poly1305 forgery, exploitable by the relay). HKDF-Expand splits the shared secret
+// into two independent traffic keys so sender->receiver and receiver->sender never
+// share a key, even though both counter spaces still start at 0.
+let sendKey = null, recvKey = null;
+
+async function hkdfExpand(keyBytes, infoStr) {
+    const base = await crypto.subtle.importKey("raw", keyBytes, "HKDF", false, ["deriveBits"]);
+    const bits = await crypto.subtle.deriveBits(
+        { name: "HKDF", hash: "SHA-256", salt: new Uint8Array(0), info: textEnc.encode(infoStr) },
+        base, 256);
+    return new Uint8Array(bits);
+}
+
+// Called once on each side right after `derivedKey` is computed, before chat begins.
+async function deriveDirectionalKeys() {
+    const s2r = await hkdfExpand(derivedKey, "beem-v1 s2r"); // sender -> receiver traffic
+    const r2s = await hkdfExpand(derivedKey, "beem-v1 r2s"); // receiver -> sender traffic
+    if (role === "sender") { sendKey = s2r; recvKey = r2s; }
+    else                   { sendKey = r2s; recvKey = s2r; }
+}
+
 $("btn-send").addEventListener("click", startSender);
 $("btn-receive").addEventListener("click", () => {
     $("receiver-error").textContent = "";
@@ -412,6 +438,7 @@ function openWs(code, resume = false) {
         xSk = xPk = null;
         mlDk = mlEk = null;
         pakeKey = xShared = derivedKey = myHash = null;
+        sendKey = recvKey = null;
         aborted = false;
         sendCounterWS = 0n;
         sendCounterDC = 0n;
@@ -480,7 +507,7 @@ function openWs(code, resume = false) {
             if (incomingCounter <= recvCounterWS) { appendSystemMsg("(replay rejected)"); return; }
             let pt;
             try {
-                pt = decrypt(derivedKey, nonce, ct);
+                pt = decrypt(recvKey, nonce, ct);
             } catch (_) {
                 appendSystemMsg("(decrypt failed \u2014 frame rejected)");
                 return;
@@ -526,6 +553,7 @@ function openWs(code, resume = false) {
             tr.set(buf,   off);
             try { derivedKey = hkdf_combine(pakeKey, xShared, kemSs, tr); }
             catch (_) { abort("HKDF failed."); return; }
+            await deriveDirectionalKeys();
             myHash = await hashPrefix16(derivedKey);
             ws.send(myHash);
             step = "await-hash";
@@ -557,6 +585,7 @@ function openWs(code, resume = false) {
             tr.set(kemCt,   off);
             try { derivedKey = hkdf_combine(pakeKey, xShared, kemSs, tr); }
             catch (_) { abort("HKDF failed."); return; }
+            await deriveDirectionalKeys();
 
             ws.send(kemCt);
             myHash = await hashPrefix16(derivedKey);
@@ -566,7 +595,7 @@ function openWs(code, resume = false) {
         }
 
         if (step === "await-hash") {
-            if (buf.length !== 4) return;
+            if (buf.length !== 16) return;
             if (!bytesEq(buf, myHash)) {
                 abort("Wrong code \u2014 codes did not match.");
                 return;
@@ -780,6 +809,7 @@ function _doVanish() {
     try { rtcPeer && rtcPeer.close(); } catch (_) {}
     ws = null; dataChannel = null; rtcPeer = null;
     derivedKey = pakeKey = xShared = xSk = xPk = null;
+    sendKey = recvKey = null;
     mlDk = mlEk = pakeState = ownPakeMsg = myHash = null;
     sendCounterWS = sendCounterDC = 0n;
     recvCounterWS = recvCounterDC = -1n;
@@ -862,7 +892,7 @@ function wireDataChannel(dc) {
         const dcCounter = new DataView(nonce.buffer, nonce.byteOffset, 12).getBigUint64(4, false);
         if (dcCounter <= recvCounterDC) return;
         let pt;
-        try { pt = decrypt(derivedKey, nonce, buf.slice(13)); } catch (_) { return; }
+        try { pt = decrypt(recvKey, nonce, buf.slice(13)); } catch (_) { return; }
         recvCounterDC = dcCounter;
         handleChatPayload(type, pt);
     };
@@ -876,7 +906,7 @@ function sendSignal(type, jsonStr) {
     sendCounterWS += 1n;
     const plaintext = textEnc.encode(jsonStr);
     let ct;
-    try { ct = encrypt(derivedKey, nonce, plaintext); } catch (_) { return; }
+    try { ct = encrypt(sendKey, nonce, plaintext); } catch (_) { return; }
     const frame = new Uint8Array(1 + 12 + ct.length);
     frame[0] = type;
     frame.set(nonce, 1);
@@ -911,7 +941,7 @@ function sendPayload(type, plaintext) {
     if (viaDC) { sendCounterDC += 1n; } else { sendCounterWS += 1n; }
     let ct;
     try {
-        ct = encrypt(derivedKey, nonce, plaintext);
+        ct = encrypt(sendKey, nonce, plaintext);
     } catch (_) {
         appendSystemMsg("(encrypt failed)");
         return false;

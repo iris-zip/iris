@@ -19,13 +19,13 @@
   --n-800: #18182A;
   --n-900: #0C0C18;
 
-  /* Accent — restrained indigo-blue */
-  --a-100: #E8ECFE;
-  --a-200: #C8D1FC;
-  --a-300: #8FA3F8;
-  --a-400: #4F6CF0;
-  --a-500: #3A52E0;
-  --a-600: #2A3DC4;
+  /* Accent — teal-cyan */
+  --a-100: #DCF2F8;
+  --a-200: #9DD9EE;
+  --a-300: #3AABCC;
+  --a-400: #01688c;
+  --a-500: #015270;
+  --a-600: #013D54;
 
   /* Semantic — light (default) */
   --bg-default:     var(--n-50);
@@ -50,7 +50,7 @@
   --status-err-bg:  #FEE2E2;
 
   /* Pre-computed focus shadow — no color-mix() */
-  --sh-focus-color: rgba(79, 108, 240, 0.32);
+  --sh-focus-color: rgba(1, 104, 140, 0.32);
 
   /* Font stacks */
   --font-sans: system-ui, -apple-system, BlinkMacSystemFont,
@@ -109,25 +109,25 @@
 /* Dark theme */
 @media (prefers-color-scheme: dark) {
   :root {
-    --bg-default:     #0C0C18;
-    --bg-subtle:      #14141F;
-    --bg-raised:      #1C1C2A;
-    --border-default: #2A2A3C;
-    --border-strong:  #3A3A50;
+    --bg-default:     #000000;
+    --bg-subtle:      #0D0D0D;
+    --bg-raised:      #141414;
+    --border-default: #222222;
+    --border-strong:  #333333;
     --fg-default:     #F0F0F6;
     --fg-muted:       #8080A0;
     --fg-subtle:      #52526A;
-    --accent:         var(--a-300);
-    --accent-bg:      #1B2050;
-    --accent-fg:      #0C0C18;
-    --accent-press:   var(--a-200);
+    --accent:         #01688c;
+    --accent-bg:      #012830;
+    --accent-fg:      #FFFFFF;
+    --accent-press:   #015270;
     --status-ok:      #4ADE80;
     --status-ok-bg:   #052814;
     --status-warn:    #FBB650;
     --status-warn-bg: #2A1A02;
     --status-err:     #F87171;
     --status-err-bg:  #2A0808;
-    --sh-focus-color: rgba(143, 163, 248, 0.32);
+    --sh-focus-color: rgba(58, 171, 204, 0.32);
   }
 }
 
@@ -272,6 +272,7 @@ img, svg { display: block; max-width: 100%; }
 
 /* ── 7. BUTTONS ──────────────────────────────────────────────────── */
 .bm-btn {
+  position: relative;
   display: inline-flex;
   align-items: center;
   justify-content: center;
@@ -294,6 +295,13 @@ img, svg { display: block; max-width: 100%; }
   user-select: none;
   -webkit-tap-highlight-color: transparent;
   text-wrap: balance;
+}
+
+.bm-btn-icon {
+  position: absolute;
+  left: var(--sp-5);
+  display: inline-flex;
+  align-items: center;
 }
 
 .bm-btn--primary {
