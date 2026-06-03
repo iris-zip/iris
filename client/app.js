@@ -1,7 +1,7 @@
 // 15.4 SRI — placeholders rewritten by scripts/build-sri.sh on release build.
 // Until rewritten, runtime check short-circuits with a dev-mode warning.
-const CRYPTO_JS_SRI   = "sha384-w4B5QKoT0lGRKS/LLtYyL+ri7UGB4B/q+tmLGOwejB1/amGa9LXVPgeaQnAguxkL";
-const CRYPTO_WASM_SRI = "sha384-BojxB1QWj78IMYKDjPOb3FCgO/zc/WvRFVJQyDuIsSG5U1ckTh+ksjcEXWabH0pe";
+const CRYPTO_JS_SRI   = "sha384-VlqKsEfGZXBbbOzYa95XrbRww3j56CFXwTVcOi6QgO6LbUOz+N4QqjR2/j55J2Uh";
+const CRYPTO_WASM_SRI = "sha384-uAu+K0tuykPvrD2O3QzhEa3zd00WlqTLgYH9/7sgJQtubEdjikFuhxDFEECzsIHT";
 const SRI_PLACEHOLDER_PREFIX = "__SRI_";
 
 async function sha384Base64(buf) {
@@ -309,6 +309,18 @@ async function deriveDirectionalKeys() {
     const r2s = await hkdfExpand(derivedKey, "beem-v1 r2s"); // receiver -> sender traffic
     if (role === "sender") { sendKey = s2r; recvKey = r2s; }
     else                   { sendKey = r2s; recvKey = s2r; }
+}
+
+// Defense-in-depth: overwrite secret bytes with zeros, then drop the
+// references. Every line is guarded, so this is safe to call in ANY state —
+// including before keys exist (values are null) or post-handshake. Hoisted
+// function declaration so teardown paths above can call it.
+function zeroizeKeys() {
+    for (const k of [derivedKey, sendKey, recvKey, pakeKey, xShared, xSk, xPk, mlDk, mlEk, ownPakeMsg, myHash]) {
+        if (k && typeof k.fill === "function") { try { k.fill(0); } catch (_) {} }
+    }
+    derivedKey = sendKey = recvKey = pakeKey = xShared = null;
+    xSk = xPk = mlDk = mlEk = ownPakeMsg = myHash = null;
 }
 
 $("btn-send").addEventListener("click", startSender);
@@ -678,6 +690,7 @@ function abort(reason) {
     aborted = true;
     step = null;
     try { ws.close(); } catch (_) {}
+    zeroizeKeys(); // don't leave key material in memory after a failed handshake
     if (role === "receiver") {
         $("receiver-error").textContent = reason;
         show("receiver");
@@ -775,6 +788,7 @@ function endChatSession() {
     releaseWakeLock();
     if (dataChannel) { dataChannel.close(); dataChannel = null; }
     if (rtcPeer) { rtcPeer.close(); rtcPeer = null; }
+    zeroizeKeys(); // session over (peer left / timeout) — wipe keys
     for (const id of ["chat-input", "btn-chat-send", "btn-file-pick"]) {
         const el = $(id);
         if (el) el.disabled = true;
@@ -808,9 +822,9 @@ function _doVanish() {
     try { dataChannel && dataChannel.close(); } catch (_) {}
     try { rtcPeer && rtcPeer.close(); } catch (_) {}
     ws = null; dataChannel = null; rtcPeer = null;
-    derivedKey = pakeKey = xShared = xSk = xPk = null;
-    sendKey = recvKey = null;
-    mlDk = mlEk = pakeState = ownPakeMsg = myHash = null;
+    pendingIce = [];
+    zeroizeKeys(); // panic vanish — overwrite then drop all key material
+    pakeState = null;
     sendCounterWS = sendCounterDC = 0n;
     recvCounterWS = recvCounterDC = -1n;
     role = currentCode = null;
@@ -831,8 +845,14 @@ $("btn-vanish").addEventListener("click", panicVanish);
 // Once DataChannel opens, file chunks bypass the server entirely.
 // Falls back to WS relay silently if WebRTC is unavailable or fails.
 
+// ICE candidates can arrive over the relay before this side has applied the
+// remote description (offer/answer race). Adding them early throws, so buffer
+// until the remote description is set, then flush.
+let pendingIce = [];
+
 function setupWebRTC() {
     if (typeof RTCPeerConnection === "undefined") return;
+    pendingIce = [];
     const cfg = { iceServers: [
         { urls: "stun:stun.l.google.com:19302" }
     ]};
@@ -919,13 +939,28 @@ async function handleRTCSignal(type, pt) {
     const msg = JSON.parse(textDec.decode(pt));
     if (type === T_RTC_OFFER) {
         await rtcPeer.setRemoteDescription(msg);
+        await flushPendingIce();
         const answer = await rtcPeer.createAnswer();
         await rtcPeer.setLocalDescription(answer);
         sendSignal(T_RTC_ANSWER, JSON.stringify(answer));
     } else if (type === T_RTC_ANSWER) {
         await rtcPeer.setRemoteDescription(msg);
+        await flushPendingIce();
     } else if (type === T_RTC_ICE) {
-        rtcPeer.addIceCandidate(msg).catch(() => {});
+        // Queue until the remote description exists; otherwise addIceCandidate throws.
+        if (rtcPeer.remoteDescription && rtcPeer.remoteDescription.type) {
+            rtcPeer.addIceCandidate(msg).catch(() => {});
+        } else {
+            pendingIce.push(msg);
+        }
+    }
+}
+
+async function flushPendingIce() {
+    const queued = pendingIce;
+    pendingIce = [];
+    for (const c of queued) {
+        try { await rtcPeer.addIceCandidate(c); } catch (_) {}
     }
 }
 
@@ -1173,7 +1208,14 @@ function handleFileChunk(pt) {
     if (pt.length < 4) return;
     const idx = new DataView(pt.buffer, pt.byteOffset, pt.byteLength).getUint32(0, false);
     const data = pt.slice(4);
-    if (recvFile.parts[idx] !== undefined) return; // duplicate from retransmit — already counted
+    if (recvFile.parts[idx] !== undefined) {
+        // Duplicate (a retransmit raced the late original). Still ACK it: the sender
+        // counted this (re)sent chunk in its in-flight window, so without an ACK back
+        // wsChunksInFlight leaks one slot per duplicate. ackReceived() floors at 0,
+        // so an extra ACK can never over-decrement.
+        sendPayload(T_FILE_ACK, new Uint8Array(0));
+        return;
+    }
     recvFile.parts[idx] = data;
     recvFile.received += data.length;
     // ACK every chunk over WS relay so the sender's flow-control window advances.

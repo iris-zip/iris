@@ -14,11 +14,6 @@ use wasm_bindgen::prelude::*;
 use x25519_dalek::{PublicKey, StaticSecret};
 
 #[wasm_bindgen]
-pub fn add(a: i32, b: i32) -> i32 {
-    a + b
-}
-
-#[wasm_bindgen]
 pub struct PakeState {
     inner: Option<Spake2<Ed25519Group>>,
     first_msg: Vec<u8>,
@@ -93,7 +88,14 @@ pub fn x25519_shared(sk_bytes: &[u8], peer_pk: &[u8]) -> Result<Vec<u8>, JsError
     pk_arr.copy_from_slice(peer_pk);
     let sk = StaticSecret::from(sk_arr);
     let pk = PublicKey::from(pk_arr);
-    Ok(sk.diffie_hellman(&pk).as_bytes().to_vec())
+    let shared = sk.diffie_hellman(&pk);
+    // reject low-order / non-contributory peer keys (these force an all-zero
+    // shared secret). Defense-in-depth — the hybrid construction already prevents
+    // exploitation, but an explicit check removes the reliance on that assumption.
+    if !shared.was_contributory() {
+        return Err(JsError::new("x25519: non-contributory peer key rejected"));
+    }
+    Ok(shared.as_bytes().to_vec())
 }
 
 // ---- ML-KEM-768 ----
