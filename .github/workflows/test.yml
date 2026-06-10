@@ -15,8 +15,17 @@ jobs:
       - name: Install Rust
         uses: dtolnay/rust-toolchain@stable
 
-      - name: Install wasm-pack
-        run: curl https://rustwasm.github.io/wasm-pack/installer/init.sh -sSf | sh
+      - name: Install wasm-pack (pinned, checksum-verified)
+        run: |
+          WP_VERSION=v0.14.0
+          WP_SHA256=278a8d668085821f4d1a637bd864f1713f872b0ae3a118c77562a308c0abfe8d
+          WP_DIR=wasm-pack-${WP_VERSION}-x86_64-unknown-linux-musl
+          curl -sSfL -o /tmp/wasm-pack.tar.gz \
+            "https://github.com/rustwasm/wasm-pack/releases/download/${WP_VERSION}/${WP_DIR}.tar.gz"
+          echo "${WP_SHA256}  /tmp/wasm-pack.tar.gz" | sha256sum -c -
+          tar -xzf /tmp/wasm-pack.tar.gz -C /tmp
+          install -m 755 "/tmp/${WP_DIR}/wasm-pack" "${HOME}/.cargo/bin/wasm-pack"
+          wasm-pack --version
 
       - name: Server unit tests
         run: cargo test --manifest-path server/Cargo.toml
@@ -26,6 +35,15 @@ jobs:
 
       - name: WASM crypto tests
         run: wasm-pack test --headless --firefox crypto
+
+      - name: Build WASM bundle (client/pkg is untracked — browser tests need it)
+        run: wasm-pack build --target web --out-dir ../client/pkg crypto
+
+      - name: HASHES.md drift assertion (reproducible build ↔ committed SRI)
+        run: |
+          bash scripts/build-sri.sh
+          git diff --exit-code client/app.js client/index.html
+          git diff --exit-code -I '^\*\*Commit:' -I '^\*\*Generated:' HASHES.md
 
       - name: Install Playwright
         working-directory: tests/browser
@@ -37,3 +55,14 @@ jobs:
       - name: Browser integration tests
         working-directory: tests/browser
         run: npx playwright test
+
+  release-build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Server release build
+        run: cargo build --locked --release --manifest-path server/Cargo.toml

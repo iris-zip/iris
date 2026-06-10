@@ -1,7 +1,7 @@
 // 15.4 SRI — placeholders rewritten by scripts/build-sri.sh on release build.
 // Until rewritten, runtime check short-circuits with a dev-mode warning.
 const CRYPTO_JS_SRI   = "sha384-VlqKsEfGZXBbbOzYa95XrbRww3j56CFXwTVcOi6QgO6LbUOz+N4QqjR2/j55J2Uh";
-const CRYPTO_WASM_SRI = "sha384-uAu+K0tuykPvrD2O3QzhEa3zd00WlqTLgYH9/7sgJQtubEdjikFuhxDFEECzsIHT";
+const CRYPTO_WASM_SRI = "sha384-F7S50QslRAnCru80hagIYC+vyyoVMUYaXdlfEVZz4cgi79VXzQkMJJTVMTQDnjNo";
 const SRI_PLACEHOLDER_PREFIX = "__SRI_";
 
 async function sha384Base64(buf) {
@@ -184,11 +184,6 @@ function setWaitMsg(text, tone) {
     if (label) label.textContent = text;
 }
 
-async function hashPrefix16(bytes) {
-    const full = await crypto.subtle.digest("SHA-256", bytes);
-    return new Uint8Array(full, 0, 16);
-}
-
 async function fileChecksum(bytes) {
     const digest = await crypto.subtle.digest("SHA-256", bytes);
     return Array.from(new Uint8Array(digest))
@@ -238,7 +233,8 @@ let mlDk = null, mlEk = null; // sender only
 let pakeKey = null;
 let xShared = null;
 let derivedKey = null;   // final combined 32-byte key
-let myHash = null;
+let myHash = null;           // own confirmation tag (sent to peer)
+let expectedPeerHash = null;  // peer's expected confirmation tag (directional)
 // Sender: "await-rx-info" -> "await-ct" -> "await-hash" -> "chat"
 // Receiver: "await-sender-info" -> "await-hash" -> "chat"
 let step = null;
@@ -311,16 +307,35 @@ async function deriveDirectionalKeys() {
     else                   { sendKey = r2s; recvKey = s2r; }
 }
 
+// directional key-confirmation tags. Both sides previously sent the identical
+// SHA-256(derivedKey) prefix and compared incoming frames against their OWN tag,
+// so the (untrusted) relay could reflect each side's tag back and fake a passed
+// confirmation on a mismatched code. Distinct HKDF info labels per direction make
+// a reflected tag fail the comparison; failure then surfaces as the clean
+// "Wrong code" abort instead of decrypt noise mid-chat.
+async function deriveConfirmTags() {
+    const mine   = role === "sender" ? "beem-v1 confirm-A" : "beem-v1 confirm-B";
+    const theirs = role === "sender" ? "beem-v1 confirm-B" : "beem-v1 confirm-A";
+    myHash           = (await hkdfExpand(derivedKey, mine)).slice(0, 16);
+    expectedPeerHash = (await hkdfExpand(derivedKey, theirs)).slice(0, 16);
+}
+
 // Defense-in-depth: overwrite secret bytes with zeros, then drop the
 // references. Every line is guarded, so this is safe to call in ANY state —
 // including before keys exist (values are null) or post-handshake. Hoisted
 // function declaration so teardown paths above can call it.
 function zeroizeKeys() {
-    for (const k of [derivedKey, sendKey, recvKey, pakeKey, xShared, xSk, xPk, mlDk, mlEk, ownPakeMsg, myHash]) {
+    for (const k of [derivedKey, sendKey, recvKey, pakeKey, xShared, xSk, xPk, mlDk, mlEk, ownPakeMsg, myHash, expectedPeerHash]) {
         if (k && typeof k.fill === "function") { try { k.fill(0); } catch (_) {} }
     }
+    // pakeState is a wasm-bindgen handle, not a typed array — fill() can't reach
+    // the SPAKE2 scalar inside WASM memory; only free() drops it. Guard on
+    // __wbg_ptr: finish_pake consumes the handle (ptr becomes 0) and freeing a
+    // consumed handle would pass a null pointer into Rust.
+    if (pakeState && pakeState.__wbg_ptr) { try { pakeState.free(); } catch (_) {} }
+    pakeState = null;
     derivedKey = sendKey = recvKey = pakeKey = xShared = null;
-    xSk = xPk = mlDk = mlEk = ownPakeMsg = myHash = null;
+    xSk = xPk = mlDk = mlEk = ownPakeMsg = myHash = expectedPeerHash = null;
 }
 
 $("btn-send").addEventListener("click", startSender);
@@ -430,7 +445,12 @@ async function startSender() {
 }
 
 function joinAsReceiver() {
-    if (ws && ws.readyState === WebSocket.CONNECTING) return;
+    // Re-entry guard. CONNECTING alone is not enough: the 5th-digit auto-submit
+    // opens the WS in ~ms, so an Enter press right after it finds the socket
+    // already OPEN, fires a second join, and the duplicate 65-byte hello lands
+    // on the sender's await-ct as a wrong-size frame → "ct size" abort.
+    if (ws && (ws.readyState === WebSocket.CONNECTING ||
+               (ws.readyState === WebSocket.OPEN && step !== null && step !== "chat"))) return;
     const code = $("code-input").value.trim();
     if (!/^\d{5}$/.test(code)) {
         $("receiver-error").textContent = "Please enter exactly 5 digits.";
@@ -449,7 +469,7 @@ function openWs(code, resume = false) {
         pakeState = ownPakeMsg = null;
         xSk = xPk = null;
         mlDk = mlEk = null;
-        pakeKey = xShared = derivedKey = myHash = null;
+        pakeKey = xShared = derivedKey = myHash = expectedPeerHash = null;
         sendKey = recvKey = null;
         aborted = false;
         sendCounterWS = 0n;
@@ -470,6 +490,10 @@ function openWs(code, resume = false) {
             // Handshake state is already in memory; server just relays bytes.
             step = "chat";
             resumeUntil = 0;
+            // Chunks in flight on the dead socket will never be ACKed — reset the
+            // window so a parked sendFile loop resumes; losses are repaired by the
+            // receiver's T_FILE_NACK round at T_FILE_END.
+            drainAckWaiters();
             // Don't flicker chip if DC is still actively transferring
             if (!useRTC || dataChannel?.readyState !== "open") {
                 setChatChip("ok", "Connected");
@@ -479,6 +503,7 @@ function openWs(code, resume = false) {
         const xkp = x25519_keypair();
         xSk = xkp.slice(0, 32);
         xPk = xkp.slice(32, 64);
+        xkp.fill(0); // wipe intermediate containing the secret key
         pakeState = start_pake(code, role === "sender" ? "A" : "B");
         ownPakeMsg = pakeState.msg; // save before finish_pake consumes state
 
@@ -486,6 +511,7 @@ function openWs(code, resume = false) {
             const kp = mlkem_keygen();
             mlDk = kp.slice(0, MLKEM_DK_LEN);
             mlEk = kp.slice(MLKEM_DK_LEN, MLKEM_DK_LEN + MLKEM_EK_LEN);
+            kp.fill(0); // wipe intermediate containing the decapsulation key
             step = "await-rx-info"; // sender waits — broadcast drops early msgs
         } else {
             const frame = new Uint8Array(RX_INFO_LEN);
@@ -496,7 +522,16 @@ function openWs(code, resume = false) {
         }
     });
 
-    ws.addEventListener("message", async (e) => {
+    // Serialize message processing. The handler awaits (deriveDirectionalKeys,
+    // deriveConfirmTags) mid-handshake; the browser delivers the next WS message during
+    // that pause, which then reads a stale `step` — e.g. receiver's kemCt+hash
+    // arrive coalesced through the tunnel and the 16-byte hash hits "await-ct"
+    // as a wrong-size frame ("ct size" abort). FIFO chain closes the race.
+    let msgChain = Promise.resolve();
+    ws.addEventListener("message", (e) => {
+        msgChain = msgChain.then(() => handleWsMessage(e)).catch(() => {});
+    });
+    const handleWsMessage = async (e) => {
         // 15.10b Pre-close marker from server (Cloudflare strips Close frames).
         if (typeof e.data === "string") {
             const m = e.data.match(/^BEEM-CLOSE:(\d+):(.*)$/);
@@ -565,8 +600,9 @@ function openWs(code, resume = false) {
             tr.set(buf,   off);
             try { derivedKey = hkdf_combine(pakeKey, xShared, kemSs, tr); }
             catch (_) { abort("HKDF failed."); return; }
+            kemSs.fill(0); // KEM shared secret no longer needed
             await deriveDirectionalKeys();
-            myHash = await hashPrefix16(derivedKey);
+            await deriveConfirmTags();
             ws.send(myHash);
             step = "await-hash";
             return;
@@ -597,10 +633,12 @@ function openWs(code, resume = false) {
             tr.set(kemCt,   off);
             try { derivedKey = hkdf_combine(pakeKey, xShared, kemSs, tr); }
             catch (_) { abort("HKDF failed."); return; }
+            kemSs.fill(0);     // KEM shared secret no longer needed
+            encapsOut.fill(0); // encaps output still holds a copy of the shared secret
             await deriveDirectionalKeys();
 
             ws.send(kemCt);
-            myHash = await hashPrefix16(derivedKey);
+            await deriveConfirmTags();
             ws.send(myHash);
             step = "await-hash";
             return;
@@ -608,7 +646,7 @@ function openWs(code, resume = false) {
 
         if (step === "await-hash") {
             if (buf.length !== 16) return;
-            if (!bytesEq(buf, myHash)) {
+            if (!bytesEq(buf, expectedPeerHash)) {
                 abort("Wrong code \u2014 codes did not match.");
                 return;
             }
@@ -616,7 +654,7 @@ function openWs(code, resume = false) {
             enterChat(code);
             setupWebRTC();
         }
-    });
+    };
 
     ws.addEventListener("close", (ev) => {
         if (wsGen !== myGen) return; // stale handler from a replaced WS — ignore
@@ -839,6 +877,11 @@ function _doVanish() {
 }
 
 $("btn-vanish").addEventListener("click", panicVanish);
+
+// Fatal-view retry. Was an inline onclick in index.html, which our own CSP
+// (script-src-attr) blocks — the button silently did nothing.
+const fatalRetryBtn = document.querySelector(".bm-fatal-retry");
+if (fatalRetryBtn) fatalRetryBtn.addEventListener("click", () => location.reload());
 
 // ---- WebRTC direct path ----
 // Signaling travels over the existing encrypted WS relay (T_RTC_* frames).

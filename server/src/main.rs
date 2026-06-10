@@ -167,7 +167,7 @@ async fn main() {
     let rooms: Rooms = Arc::new(DashMap::new());
     let rate_limits: RateLimits = Arc::new(DashMap::new());
     let concurrent: Concurrent = Arc::new(DashMap::new());
-    spawn_sweeper(rooms.clone(), rate_limits.clone());
+    spawn_sweeper(rooms.clone(), rate_limits.clone(), concurrent.clone());
     let state = AppState { rooms, rate_limits, concurrent, session_secs };
 
     // 12.1 Rate limit: /new ~ 10/min per IP (burst 10, replenish 1 per 6s).
@@ -234,27 +234,36 @@ async fn main() {
     .expect("serve");
 }
 
-fn spawn_sweeper(rooms: Rooms, rate_limits: RateLimits) {
+// One sweep pass over all three maps. Free function so tests can drive it
+// with a controlled `now` instead of waiting on the interval.
+fn sweep_maps(rooms: &Rooms, rate_limits: &RateLimits, concurrent: &Concurrent, now: Instant) {
+    let window = Duration::from_secs(WS_WINDOW_SECS);
+    let ban_medium_window = Duration::from_secs(BAN_MEDIUM_WINDOW_SECS);
+    rooms.retain(|_, r| r.expires_at > now);
+    // 15.2 + 15.3 GC: keep entries with any active state or recent history.
+    rate_limits.retain(|_, s| {
+        let has_recent = s.attempts.back().map_or(false, |t| now.duration_since(*t) < window);
+        let in_cooldown = s.cooldown_until.map_or(false, |u| u > now);
+        let in_ban = s.ban_until.map_or(false, |u| u > now);
+        let recent_ban_history = s.ban_history.back().map_or(false, |t| now.duration_since(*t) < ban_medium_window);
+        has_recent || in_cooldown || in_ban || recent_ban_history
+    });
+    // Concurrent-connection counters: entries decremented to 0 are dead —
+    // without this they accumulate one entry per unique IP forever.
+    concurrent.retain(|_, n| *n > 0);
+}
+
+fn spawn_sweeper(rooms: Rooms, rate_limits: RateLimits, concurrent: Concurrent) {
     tokio::spawn(async move {
         loop {
             let r = rooms.clone();
             let rl = rate_limits.clone();
+            let c = concurrent.clone();
             let result = tokio::spawn(async move {
                 let mut interval = tokio::time::interval(Duration::from_secs(10));
-                let window = Duration::from_secs(WS_WINDOW_SECS);
-                let ban_medium_window = Duration::from_secs(BAN_MEDIUM_WINDOW_SECS);
                 loop {
                     interval.tick().await;
-                    let now = Instant::now();
-                    r.retain(|_, r| r.expires_at > now);
-                    // 15.2 + 15.3 GC: keep entries with any active state or recent history.
-                    rl.retain(|_, s| {
-                        let has_recent = s.attempts.back().map_or(false, |t| now.duration_since(*t) < window);
-                        let in_cooldown = s.cooldown_until.map_or(false, |u| u > now);
-                        let in_ban = s.ban_until.map_or(false, |u| u > now);
-                        let recent_ban_history = s.ban_history.back().map_or(false, |t| now.duration_since(*t) < ban_medium_window);
-                        has_recent || in_cooldown || in_ban || recent_ban_history
-                    });
+                    sweep_maps(&r, &rl, &c, Instant::now());
                 }
             }).await;
             if let Err(e) = result {
@@ -825,5 +834,25 @@ mod tests {
 
         assert!(rx_a.try_recv().is_ok(),  "room-A subscriber must receive the frame");
         assert!(rx_b.try_recv().is_err(), "room-B subscriber must NOT receive room-A's frame");
+    }
+
+    // TEST-S-012 — Sweeper GCs zeroed concurrent-IP counters (regression test)
+    // A counter decremented to 0 is a dead entry and must be removed; an active
+    // connection (n ≥ 1) must survive the pass.
+    #[test]
+    fn test_sweeper_gc_concurrent_map() {
+        let rooms: Rooms = Arc::new(DashMap::new());
+        let rate_limits: RateLimits = Arc::new(DashMap::new());
+        let concurrent: Concurrent = Arc::new(DashMap::new());
+
+        let dead_ip   = IpAddr::V4(Ipv4Addr::new(203, 0, 113, 1));
+        let active_ip = IpAddr::V4(Ipv4Addr::new(203, 0, 113, 2));
+        concurrent.insert(dead_ip, 0);
+        concurrent.insert(active_ip, 2);
+
+        sweep_maps(&rooms, &rate_limits, &concurrent, Instant::now());
+
+        assert!(concurrent.get(&dead_ip).is_none(), "zeroed counter must be GC'd");
+        assert_eq!(*concurrent.get(&active_ip).unwrap(), 2, "active counter must survive");
     }
 }

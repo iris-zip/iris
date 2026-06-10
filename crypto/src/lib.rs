@@ -12,6 +12,7 @@ use sha2::Sha256;
 use spake2::{Ed25519Group, Identity, Password, Spake2};
 use wasm_bindgen::prelude::*;
 use x25519_dalek::{PublicKey, StaticSecret};
+use zeroize::Zeroize;
 
 #[wasm_bindgen]
 pub struct PakeState {
@@ -87,6 +88,7 @@ pub fn x25519_shared(sk_bytes: &[u8], peer_pk: &[u8]) -> Result<Vec<u8>, JsError
     let mut pk_arr = [0u8; 32];
     pk_arr.copy_from_slice(peer_pk);
     let sk = StaticSecret::from(sk_arr);
+    sk_arr.zeroize(); // From copies — wipe the local copy of the secret key
     let pk = PublicKey::from(pk_arr);
     let shared = sk.diffie_hellman(&pk);
     // reject low-order / non-contributory peer keys (these force an all-zero
@@ -105,11 +107,12 @@ type MlDk = <MlKem768 as KemCore>::DecapsulationKey;
 #[wasm_bindgen]
 pub fn mlkem_keygen() -> Vec<u8> {
     let (dk, ek) = MlKem768::generate(&mut OsRng);
-    let dk_bytes = dk.as_bytes();
+    let mut dk_bytes = dk.as_bytes();
     let ek_bytes = ek.as_bytes();
     let mut out = Vec::with_capacity(dk_bytes.len() + ek_bytes.len());
     out.extend_from_slice(&dk_bytes);
     out.extend_from_slice(&ek_bytes);
+    dk_bytes.as_mut_slice().zeroize(); // encoded copy of the decapsulation key
     out
 }
 
@@ -128,26 +131,30 @@ pub fn mlkem_encaps(ek_bytes: &[u8]) -> Result<Vec<u8>, JsError> {
     let arr = Array::try_from(ek_bytes)
         .map_err(|_| JsError::new("mlkem_encaps: bad ek length"))?;
     let ek = <MlEk as EncodedSizeUser>::from_bytes(&arr);
-    let (ct, ss) = ek
+    let (ct, mut ss) = ek
         .encapsulate(&mut OsRng)
         .map_err(|e| JsError::new(&format!("encaps: {:?}", e)))?;
     let mut out = Vec::with_capacity(ct.len() + ss.len());
     out.extend_from_slice(&ct);
     out.extend_from_slice(&ss);
+    ss.as_mut_slice().zeroize(); // local copy of the shared secret
     Ok(out)
 }
 
 #[wasm_bindgen]
 pub fn mlkem_decaps(dk_bytes: &[u8], ct_bytes: &[u8]) -> Result<Vec<u8>, JsError> {
-    let dk_arr = Array::try_from(dk_bytes)
+    let mut dk_arr = Array::try_from(dk_bytes)
         .map_err(|_| JsError::new("mlkem_decaps: bad dk length"))?;
     let dk = <MlDk as EncodedSizeUser>::from_bytes(&dk_arr);
+    dk_arr.as_mut_slice().zeroize(); // local copy of the decapsulation key
     let ct_arr = Array::try_from(ct_bytes)
         .map_err(|_| JsError::new("mlkem_decaps: bad ct length"))?;
-    let ss = dk
+    let mut ss = dk
         .decapsulate(&ct_arr)
         .map_err(|e| JsError::new(&format!("decaps: {:?}", e)))?;
-    Ok(ss.to_vec())
+    let out = ss.to_vec();
+    ss.as_mut_slice().zeroize(); // local copy of the shared secret
+    Ok(out)
 }
 
 // ---- HKDF-SHA256 combiner ----
@@ -165,8 +172,9 @@ pub fn hkdf_combine(
     ikm.extend_from_slice(kem_shared);
     let hk = Hkdf::<Sha256>::new(Some(transcript), &ikm);
     let mut out = [0u8; 32];
-    hk.expand(b"beem-v1 aead", &mut out)
-        .map_err(|e| JsError::new(&format!("hkdf: {:?}", e)))?;
+    let res = hk.expand(b"beem-v1 aead", &mut out);
+    ikm.zeroize(); // ikm concatenates all three shared secrets — wipe on every path
+    res.map_err(|e| JsError::new(&format!("hkdf: {:?}", e)))?;
     Ok(out.to_vec())
 }
 

@@ -31,7 +31,7 @@ Open `http://127.0.0.1:8080` in two browser tabs (or tab + phone on the same LAN
 1. On the first tab click **Send**. A 5-digit code appears.
 2. On the second tab click **Receive**, enter the code, hit **Join**.
 3. When both tabs show the chat view, the hybrid handshake finished successfully.
-4. Type text, or click **Send file…** to transfer a file (up to 100 MB).
+4. Type text, or click **Send file…** to transfer a file (up to 1 GB).
 
 The 5-digit code is valid for 60 seconds; each code is single-use and pairs exactly two clients.
 
@@ -40,8 +40,9 @@ The 5-digit code is valid for 60 seconds; each code is single-use and pairs exac
 - **PAKE (SPAKE2 over Ed25519):** the 5-digit code is never sent over the network; both sides derive a shared secret *only if* they typed the same code. A wrong code produces a different key and the handshake aborts before any data flows.
 - **Classical KEX (X25519):** standard elliptic-curve Diffie-Hellman.
 - **Post-quantum KEX (ML-KEM-768):** the NIST-standardized Kyber lattice KEM. Resistant to attackers with large-scale quantum computers.
-- **Key combine:** `key = HKDF-SHA256(PAKE_key ‖ X25519_shared ‖ ML-KEM_shared, info="beem-v1 aead")`. The session key is safe as long as *any one* of the three primitives remains unbroken.
-- **Channel cipher:** ChaCha20-Poly1305 with a 12-byte monotonic-counter nonce per direction. Every frame carries its own nonce; a tampered frame fails AEAD and is dropped.
+- **Key combine:** `key = HKDF-SHA256(PAKE_key ‖ X25519_shared ‖ ML-KEM_shared, salt=transcript, info="beem-v1 aead")` — the salt binds the full public handshake transcript. The session key is safe as long as *any one* of the three primitives remains unbroken.
+- **Directional traffic keys:** the combined key is split via HKDF into two independent one-way keys (sender→receiver and receiver→sender), so the two directions never share a (key, nonce) pair.
+- **Channel cipher:** ChaCha20-Poly1305 with a 12-byte monotonic-counter nonce per direction and transport. Every frame carries its own nonce; a tampered frame fails AEAD and is dropped.
 - **Server role:** pure opaque-byte relay over WebSocket. It never learns the code value, key, plaintext, filenames, or sizes. It logs exactly one line at startup (the listen banner) and nothing else.
 
 The full rationale lives in the project's internal design notes.
@@ -65,8 +66,8 @@ The full rationale lives in the project's internal design notes.
 ## Hardening (phase 12, already shipped)
 
 - `POST /new` rate-limited per source IP (10-request burst, ~10/min sustained).
-- WS frame and message size capped at 128 KB (room for one 64 KB encrypted chunk).
-- Session duration capped at 5 minutes; server closes cleanly after.
+- WS frame and message size capped at 200 KB (room for one 128 KB encrypted chunk).
+- Session duration capped at 60 minutes; server closes cleanly after.
 - Strict `^\d{5}$` validation of the code query parameter.
 - Response headers: HSTS, strict CSP, `X-Frame-Options: DENY`, `X-Content-Type-Options: nosniff`, `Referrer-Policy: no-referrer`.
 - Zero content, IP, or code in server logs.
