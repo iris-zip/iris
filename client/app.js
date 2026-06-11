@@ -248,13 +248,20 @@ let expectedPeerHash = null;  // peer's expected confirmation tag (directional)
 let step = null;
 let aborted = false;
 let sendCounterWS = 0n;
-let sendCounterDC = 0n;
 let recvCounterWS = -1n; // per-transport strictly increasing; prevents cross-transport replay drops
-let recvCounterDC = -1n;
+// 16.9.2: one counter pair per DC path; nonce[3] = 1 + pathId keeps the four
+// counter spaces disjoint from each other and from WS (0x00) — no nonce reuse
+// across paths even though every path encrypts under the same directional key.
+let sendCountersDC = [0n, 0n, 0n, 0n];
+let recvCountersDC = [-1n, -1n, -1n, -1n];
 
-// WebRTC direct channel — set up after PAKE completes, falls back to WS relay silently
-let rtcPeer = null;
-let dataChannel = null;
+// WebRTC direct channels — set up after PAKE completes, falls back to WS relay silently.
+// 16.9.2 parallel striping: N independent peer connections (separate SCTP
+// associations — channels on ONE connection would share a single congestion
+// window and gain nothing). File chunks stripe across whichever paths are open,
+// lifting the per-stream window÷RTT ceiling on high-latency links ~N×.
+const DC_PATHS = 4; // Ookla's own floor; more streams self-congest past the sweet spot
+let rtcPaths = []; // pathId → { id, pc, dc, pendingIce } or null
 let useRTC = false;
 // 16.9.1 DataChannel auto-reconnect: on mid-session DC loss the sender (offerer)
 // rebuilds the peer connection with a fresh offer over WS signalling; active
@@ -291,7 +298,8 @@ const COUNTER_MAX = (1n << 64n) - 1n;
 // legitimate frame is a 128 KiB chunk + 29 B crypto overhead.
 const MAX_FRAME = 200 * 1024;
 
-// transport: 0 = WebSocket, 1 = DataChannel — byte 3 of nonce separates counter spaces
+// transport: 0 = WebSocket, 1+pathId = DataChannel path (16.9.2) — byte 3 of the
+// nonce separates the counter spaces so no nonce repeats across transports/paths
 function makeNonce(counter, transport = 0) {
     if (counter >= COUNTER_MAX) { abort("Session ended: counter exhausted."); return null; }
     // 12-byte nonce: [0,0,0,transport(1B)] || 8-byte big-endian counter
@@ -497,9 +505,9 @@ function openWs(code, resume = false) {
         sendKey = recvKey = null;
         aborted = false;
         sendCounterWS = 0n;
-        sendCounterDC = 0n;
         recvCounterWS = -1n;
-        recvCounterDC = -1n;
+        sendCountersDC = [0n, 0n, 0n, 0n];
+        recvCountersDC = [-1n, -1n, -1n, -1n];
         drainAckWaiters();
     }
     preCloseCode = 0;
@@ -519,7 +527,7 @@ function openWs(code, resume = false) {
             // receiver's T_FILE_NACK round at T_FILE_END.
             drainAckWaiters();
             // Don't flicker chip if DC is still actively transferring
-            if (!useRTC || dataChannel?.readyState !== "open") {
+            if (openDcPaths().length === 0) {
                 setChatChip("ok", "Connected");
             }
             return;
@@ -837,8 +845,8 @@ function attemptResume() {
         endChatSession();
         return;
     }
-    // Don't flicker chip while DataChannel is carrying the transfer
-    if (!useRTC || dataChannel?.readyState !== "open") {
+    // Don't flicker chip while DataChannels are carrying the transfer
+    if (openDcPaths().length === 0) {
         setChatChip("warn", "Reconnecting…");
     }
     // Backoff 0s/3s/6s/12s (~4 attempts per grace window). Each failed connect
@@ -864,8 +872,7 @@ function endChatSession() {
     settleDcReconnect(); // abandon any in-flight DC rebuild + wake parked loops (16.9.1)
     stopWsKeepalive();
     releaseWakeLock();
-    if (dataChannel) { dataChannel.close(); dataChannel = null; }
-    if (rtcPeer) { rtcPeer.close(); rtcPeer = null; }
+    closeAllDcPaths();
     zeroizeKeys(); // session over (peer left / timeout) — wipe keys
     for (const id of ["chat-input", "btn-chat-send", "btn-file-pick"]) {
         const el = $(id);
@@ -898,14 +905,14 @@ function _doVanish() {
     stopWsKeepalive();
     releaseWakeLock();
     try { ws && ws.close(); } catch (_) {}
-    try { dataChannel && dataChannel.close(); } catch (_) {}
-    try { rtcPeer && rtcPeer.close(); } catch (_) {}
-    ws = null; dataChannel = null; rtcPeer = null;
-    pendingIce = [];
+    closeAllDcPaths();
+    ws = null;
     zeroizeKeys(); // panic vanish — overwrite then drop all key material
     pakeState = null;
-    sendCounterWS = sendCounterDC = 0n;
-    recvCounterWS = recvCounterDC = -1n;
+    sendCounterWS = 0n;
+    recvCounterWS = -1n;
+    sendCountersDC = [0n, 0n, 0n, 0n];
+    recvCountersDC = [-1n, -1n, -1n, -1n];
     role = currentCode = null;
     $("chat-log").innerHTML = "";
     $("chat-input").value = "";
@@ -930,9 +937,8 @@ if (fatalRetryBtn) fatalRetryBtn.addEventListener("click", () => location.reload
 // Falls back to WS relay silently if WebRTC is unavailable or fails.
 
 // ICE candidates can arrive over the relay before this side has applied the
-// remote description (offer/answer race). Adding them early throws, so buffer
-// until the remote description is set, then flush.
-let pendingIce = [];
+// remote description (offer/answer race). Adding them early throws, so each
+// path buffers in path.pendingIce until its remote description is set.
 
 // Self-hosted STUN/TURN: /turn.json exists only where TURN is configured
 // (gitignored) so the relay address never enters the repo. Shape:
@@ -953,70 +959,143 @@ fetch("./turn.json")
 
 function setupWebRTC() {
     if (typeof RTCPeerConnection === "undefined") return;
-    pendingIce = [];
-    const cfg = { iceServers: turnConfig
-        ? [{ urls: turnConfig.urls, username: turnConfig.username, credential: turnConfig.credential }]
-        : [{ urls: "stun:stun.l.google.com:19302" }]
-    };
-    rtcPeer = new RTCPeerConnection(cfg);
-
-    rtcPeer.onicecandidate = (e) => {
-        if (e.candidate) {
-            sendSignal(T_RTC_ICE, JSON.stringify(e.candidate));
-        }
-    };
-
+    rtcPaths = [];
+    // Receiver paths are created lazily when each offer arrives (ensureRecvPath).
     if (role === "sender") {
-        dataChannel = rtcPeer.createDataChannel("beem", { ordered: true });
-        dataChannel.binaryType = "arraybuffer";
-        wireDataChannel(dataChannel);
-        rtcPeer.createOffer().then(offer => {
-            rtcPeer.setLocalDescription(offer);
-            sendSignal(T_RTC_OFFER, JSON.stringify(offer));
-        });
-    } else {
-        rtcPeer.ondatachannel = (e) => {
-            dataChannel = e.channel;
-            dataChannel.binaryType = "arraybuffer";
-            wireDataChannel(dataChannel);
-        };
+        for (let k = 0; k < DC_PATHS; k++) createSenderPath(k);
     }
 }
 
-function wireDataChannel(dc) {
+function rtcConfig() {
+    return { iceServers: turnConfig
+        ? [{ urls: turnConfig.urls, username: turnConfig.username, credential: turnConfig.credential }]
+        : [{ urls: "stun:stun.l.google.com:19302" }]
+    };
+}
+
+function newDcPath(k) {
+    const path = { id: k, pc: new RTCPeerConnection(rtcConfig()), dc: null, pendingIce: [] };
+    path.pc.onicecandidate = (e) => {
+        if (e.candidate) sendSignal(T_RTC_ICE, JSON.stringify({ p: k, d: e.candidate }));
+    };
+    rtcPaths[k] = path;
+    return path;
+}
+
+function createSenderPath(k) {
+    const path = newDcPath(k);
+    path.dc = path.pc.createDataChannel("beem-" + k, { ordered: true });
+    path.dc.binaryType = "arraybuffer";
+    wireDataChannel(path);
+    path.pc.createOffer().then(offer => {
+        path.pc.setLocalDescription(offer);
+        sendSignal(T_RTC_OFFER, JSON.stringify({ p: k, d: offer }));
+    });
+}
+
+function ensureRecvPath(k) {
+    if (rtcPaths[k]) return rtcPaths[k];
+    const path = newDcPath(k);
+    path.pc.ondatachannel = (e) => {
+        path.dc = e.channel;
+        path.dc.binaryType = "arraybuffer";
+        wireDataChannel(path);
+    };
+    return path;
+}
+
+function openDcPaths() {
+    return rtcPaths.filter(p => p && p.dc && p.dc.readyState === "open");
+}
+
+function closeAllDcPaths() {
+    for (const p of rtcPaths) {
+        if (!p) continue;
+        try { p.dc?.close(); } catch (_) {}
+        try { p.pc?.close(); } catch (_) {}
+    }
+    rtcPaths = [];
+    useRTC = false;
+}
+
+// A path is stalled when bytes are stuck in its buffer with zero drain for
+// DC_STALL_MS — the dead-route case (VPN drop, WiFi toggle) where readyState
+// stays "open" and onclose never fires. Baseline resets on every observed
+// drain; sends raising the buffer move the baseline without resetting the clock.
+const DC_BUFFER_CAP = 8 * 1024 * 1024;
+const DC_STALL_MS = 5000;
+function dcPathStalled(p, now) {
+    const b = p.dc.bufferedAmount;
+    if (p.lastBuf === undefined || b < p.lastBuf) {
+        p.lastBuf = b;
+        p.lastDrain = now;
+        return false;
+    }
+    if (b > p.lastBuf) p.lastBuf = b;
+    return b > 0 && (now - p.lastDrain) > DC_STALL_MS;
+}
+
+// Least-buffered open path — adaptive striping: fast paths drain quicker and
+// naturally take more chunks; a slowing path stops being picked long before it
+// stalls. Stalled paths are closed on sight so chunks stop vanishing into them.
+function pickDcPath() {
+    const now = Date.now();
+    let best = null;
+    for (const p of rtcPaths) {
+        if (!p || !p.dc || p.dc.readyState !== "open") continue;
+        if (dcPathStalled(p, now)) {
+            try { p.dc.close(); } catch (_) {}
+            handleDcPathClose(p); // don't wait for the onclose event
+            continue;
+        }
+        if (!best || p.dc.bufferedAmount < best.dc.bufferedAmount) best = p;
+    }
+    return best;
+}
+
+function wireDataChannel(path) {
+    const dc = path.dc;
     dc.onopen = async () => {
+        const firstUp = !useRTC;
         useRTC = true;
-        if (dcReconnecting) settleDcReconnect(); // unpark chunk loops on the rebuilt channel
+        if (dcReconnecting) settleDcReconnect(); // unpark chunk loops on the rebuilt path
+        if (!firstUp) return; // label the connection once, from the first path that opens
         let label = "Direct";
         try {
-            const stats = await rtcPeer.getStats();
+            const stats = await path.pc.getStats();
             let pair = null;
             stats.forEach(s => { if (s.type === "candidate-pair" && s.nominated) pair = s; });
             if (pair) {
                 const local  = stats.get(pair.localCandidateId);
                 const remote = stats.get(pair.remoteCandidateId);
                 const bothHost = local?.candidateType === "host" && remote?.candidateType === "host";
-                if (bothHost) label = "Direct LAN";
+                if (local?.candidateType === "relay" || remote?.candidateType === "relay")
+                    label = "relay (turn)";
+                else if (bothHost) label = "Direct LAN";
                 else if (local?.candidateType === "srflx" || remote?.candidateType === "srflx")
                     label = "P2P (internet)";
             }
         } catch (_) {}
         appendSystemMsg(`${label} connection — server bypassed`);
     };
-    dc.onclose = () => handleDcClose();
-    dc.onerror = () => { useRTC = false; };
+    dc.onclose = () => handleDcPathClose(path);
+    dc.onerror = () => { useRTC = openDcPaths().length > 0; };
     dc.onmessage = (e) => {
         if (!(e.data instanceof ArrayBuffer)) return;
         const buf = new Uint8Array(e.data);
         if (buf.length < 13 || buf.length > MAX_FRAME) return;
         const type = buf[0];
         const nonce = buf.slice(1, 13);
-        if (nonce[3] !== 1) return;
+        // 16.9.2: counter space indexed by the nonce transport byte (1 + pathId),
+        // NOT by arrival channel — a frame replayed onto a different path still
+        // lands in its original counter space and dies on the strict-greater check.
+        const pid = nonce[3] - 1;
+        if (pid < 0 || pid >= DC_PATHS) return;
         const dcCounter = new DataView(nonce.buffer, nonce.byteOffset, 12).getBigUint64(4, false);
-        if (dcCounter <= recvCounterDC) return;
+        if (dcCounter <= recvCountersDC[pid]) return;
         let pt;
         try { pt = decrypt(recvKey, nonce, buf.slice(13)); } catch (_) { return; }
-        recvCounterDC = dcCounter;
+        recvCountersDC[pid] = dcCounter;
         handleChatPayload(type, pt);
     };
 }
@@ -1037,8 +1116,13 @@ function waitDcSettled() {
     if (!dcReconnecting) return Promise.resolve();
     return new Promise(r => dcWaiters.push(r));
 }
-function handleDcClose() {
-    useRTC = false;
+function handleDcPathClose(path) {
+    if (rtcPaths[path.id] === path) {
+        try { path.pc?.close(); } catch (_) {}
+        rtcPaths[path.id] = null;
+    }
+    useRTC = openDcPaths().length > 0;
+    if (useRTC) return; // 16.9.2 graceful degrade — surviving paths carry the transfer
     if (step !== "chat" || dcReconnecting) return; // teardown, or already rebuilding
     dcReconnecting = true;
     appendSystemMsg("(direct connection lost — reconnecting…)");
@@ -1055,18 +1139,38 @@ function handleDcClose() {
 }
 async function rebuildRTC() {
     for (let i = 0; i < DC_RECONNECT_TRIES && step === "chat"; i++) {
-        try { rtcPeer?.close(); } catch (_) {}
-        rtcPeer = null;
-        dataChannel = null;
-        setupWebRTC(); // fresh peer + channel + offer over WS signalling
+        closeAllDcPaths();
+        setupWebRTC(); // fresh paths + offers over WS signalling
         const deadline = Date.now() + DC_RECONNECT_OPEN_MS;
-        while (Date.now() < deadline && step === "chat" && dataChannel?.readyState !== "open") {
+        while (Date.now() < deadline && step === "chat" && openDcPaths().length === 0) {
             await new Promise(r => setTimeout(r, 100));
         }
-        if (dataChannel?.readyState === "open") { settleDcReconnect(); return; }
+        if (openDcPaths().length > 0) { settleDcReconnect(); return; }
     }
     settleDcReconnect();
     if (step === "chat") appendSystemMsg("(direct reconnect failed — using relay)");
+}
+
+// 16.9.2: park while every open path is above the buffer cap. Stalled paths are
+// closed as they're found; returns as soon as one path has room, none remain
+// (caller falls back to WS), the transfer is cancelled, or a rebuild starts.
+async function dcBackpressure() {
+    while (!sendCancelled && !dcReconnecting) {
+        const now = Date.now();
+        let anyAlive = false;
+        let anyFree = false;
+        for (const p of openDcPaths()) {
+            if (dcPathStalled(p, now)) {
+                try { p.dc.close(); } catch (_) {}
+                handleDcPathClose(p);
+                continue;
+            }
+            anyAlive = true;
+            if (p.dc.bufferedAmount <= DC_BUFFER_CAP) anyFree = true;
+        }
+        if (!anyAlive || anyFree) return;
+        await new Promise(r => setTimeout(r, 10));
+    }
 }
 
 function sendSignal(type, jsonStr) {
@@ -1086,53 +1190,61 @@ function sendSignal(type, jsonStr) {
 }
 
 async function handleRTCSignal(type, pt) {
-    if (!rtcPeer) return;
+    if (typeof RTCPeerConnection === "undefined" || step !== "chat") return;
+    // 16.9.2: every signal is wrapped { p: pathId, d: payload }
     const msg = JSON.parse(textDec.decode(pt));
+    const k = msg.p >>> 0;
+    if (k >= DC_PATHS || msg.d === undefined) return;
+    const body = msg.d;
     if (type === T_RTC_OFFER) {
-        if (rtcPeer.remoteDescription) {
-            // 16.9.1 reconnect offer — the old peer connection is dead; rebuild
-            try { rtcPeer.close(); } catch (_) {}
-            rtcPeer = null;
-            dataChannel = null;
-            useRTC = false;
-            setupWebRTC();
+        let path = ensureRecvPath(k);
+        if (path.pc.remoteDescription) {
+            // 16.9.1 reconnect offer — the old peer connection for this path is dead
+            try { path.pc.close(); } catch (_) {}
+            rtcPaths[k] = null;
+            path = ensureRecvPath(k);
         }
-        await rtcPeer.setRemoteDescription(msg);
-        await flushPendingIce();
-        const answer = await rtcPeer.createAnswer();
-        await rtcPeer.setLocalDescription(answer);
-        sendSignal(T_RTC_ANSWER, JSON.stringify(answer));
+        await path.pc.setRemoteDescription(body);
+        await flushPendingIce(path);
+        const answer = await path.pc.createAnswer();
+        await path.pc.setLocalDescription(answer);
+        sendSignal(T_RTC_ANSWER, JSON.stringify({ p: k, d: answer }));
     } else if (type === T_RTC_ANSWER) {
-        await rtcPeer.setRemoteDescription(msg);
-        await flushPendingIce();
+        const path = rtcPaths[k];
+        if (!path || path.pc.remoteDescription) return; // unknown path / duplicate answer
+        await path.pc.setRemoteDescription(body);
+        await flushPendingIce(path);
     } else if (type === T_RTC_ICE) {
+        const path = rtcPaths[k];
+        if (!path) return; // per-path WS ordering guarantees the offer precedes its ICE
         // Queue until the remote description exists; otherwise addIceCandidate throws.
-        if (rtcPeer.remoteDescription && rtcPeer.remoteDescription.type) {
-            rtcPeer.addIceCandidate(msg).catch(() => {});
+        if (path.pc.remoteDescription && path.pc.remoteDescription.type) {
+            path.pc.addIceCandidate(body).catch(() => {});
         } else {
-            pendingIce.push(msg);
+            path.pendingIce.push(body);
         }
     }
 }
 
-async function flushPendingIce() {
-    const queued = pendingIce;
-    pendingIce = [];
+async function flushPendingIce(path) {
+    const queued = path.pendingIce;
+    path.pendingIce = [];
     for (const c of queued) {
-        try { await rtcPeer.addIceCandidate(c); } catch (_) {}
+        try { await path.pc.addIceCandidate(c); } catch (_) {}
     }
 }
 
 function sendPayload(type, plaintext) {
     if (step !== "chat") return false;
-    // File chunks go direct when DataChannel is open; signaling + chat always via WS
-    const viaDC = useRTC && dataChannel?.readyState === "open" &&
-                  (type === T_FILE_HDR || type === T_FILE_CHK || type === T_FILE_END);
-    if (!viaDC && (!ws || ws.readyState !== WebSocket.OPEN)) return false;
-    const transport = viaDC ? 1 : 0;
-    const nonce = makeNonce(viaDC ? sendCounterDC : sendCounterWS, transport);
+    // File frames stripe across open DC paths (16.9.2, least-buffered first);
+    // signaling + chat always via WS.
+    const wantsDC = type === T_FILE_HDR || type === T_FILE_CHK || type === T_FILE_END;
+    const path = wantsDC && useRTC ? pickDcPath() : null;
+    if (!path && (!ws || ws.readyState !== WebSocket.OPEN)) return false;
+    const nonce = path ? makeNonce(sendCountersDC[path.id], 1 + path.id)
+                       : makeNonce(sendCounterWS, 0);
     if (!nonce) return false;
-    if (viaDC) { sendCounterDC += 1n; } else { sendCounterWS += 1n; }
+    if (path) { sendCountersDC[path.id] += 1n; } else { sendCounterWS += 1n; }
     let ct;
     try {
         ct = encrypt(sendKey, nonce, plaintext);
@@ -1144,8 +1256,8 @@ function sendPayload(type, plaintext) {
     frame[0] = type;
     frame.set(nonce, 1);
     frame.set(ct, 13);
-    if (viaDC) {
-        dataChannel.send(frame);
+    if (path) {
+        path.dc.send(frame);
     } else {
         ws.send(frame);
     }
@@ -1349,11 +1461,8 @@ async function sendFile(file) {
         //   Sender waits here when ACK_WINDOW chunks are already in flight.
         //   This caps the server broadcast ring buffer and paces sender to receiver speed.
         // DC (P2P/LAN): SCTP congestion control handles it; just cap OOM risk.
-        const chunkViaDC = useRTC && dataChannel?.readyState === "open";
-        if (chunkViaDC) {
-            while (!sendCancelled && dataChannel.bufferedAmount > 8 * 1024 * 1024) {
-                await new Promise(r => setTimeout(r, 10));
-            }
+        if (useRTC && openDcPaths().length > 0) {
+            await dcBackpressure();
         } else {
             wsChunksInFlight++;
             if (wsChunksInFlight >= ACK_WINDOW && !sendCancelled) {
@@ -1412,6 +1521,11 @@ let sendCancelled = false;   // observed by the sendFile/handleFileNack loops; r
 let sendCancelMsg = "";      // terminal row label ("Cancelled" vs "Cancelled by peer")
 let currentSendRefs = null;  // outgoing row refs so a peer-initiated cancel can mark the card
 let dropStrayChunks = false; // after an incoming cancel, late in-flight chunks are expected — drop them silently
+// 16.9.2: with striped paths, chunks (or even T_FILE_END) on a fast path can
+// arrive before the header that went on a slower one — stash and replay on HDR.
+let earlyChunks = [];
+let earlyEnd = false;
+const EARLY_CHUNK_CAP = 256; // 32 MB of path skew — far beyond any real race
 
 function handleFileHdr(pt) {
     if (pt.length < 10) { appendSystemMsg("(bad file header)"); return; }
@@ -1426,15 +1540,24 @@ function handleFileHdr(pt) {
         const f = recvFile;
         recvFile = null;
         dropStrayChunks = true; // chunks already in flight will keep landing — expected
+        earlyChunks = [];
+        earlyEnd = false;
         sendPayload(T_FILE_CANCEL, new Uint8Array([0x01])); // tell sender to stop
         failFileRow(f.refs, "Cancelled");
     });
     recvFile = { name, size, totalChunks: Math.max(1, Math.ceil(size / CHUNK_SIZE)), nackAttempts: 0, parts: [], received: 0, refs, speedSamples: [] };
+    // Replay anything that beat this header across a faster path (16.9.2)
+    const replay = earlyChunks;
+    earlyChunks = [];
+    for (const c of replay) handleFileChunk(c);
+    if (earlyEnd) { earlyEnd = false; handleFileEnd(); }
 }
 
 function handleFileChunk(pt) {
     if (!recvFile) {
-        if (!dropStrayChunks) appendSystemMsg("(chunk without header)");
+        if (!dropStrayChunks && earlyChunks.length < EARLY_CHUNK_CAP) {
+            earlyChunks.push(pt); // header still in flight on another path (16.9.2)
+        }
         return;
     }
     if (pt.length < 4) return;
@@ -1461,7 +1584,10 @@ function handleFileChunk(pt) {
 }
 
 async function handleFileEnd() {
-    if (!recvFile) return;
+    if (!recvFile) {
+        if (!dropStrayChunks) earlyEnd = true; // END beat the header across paths (16.9.2)
+        return;
+    }
     const f = recvFile;
     if (f.received !== f.size && f.nackAttempts < 3 && step === "chat") {
         const missing = [];
@@ -1510,7 +1636,9 @@ async function handleFileEnd() {
 function handleFileCancel(pt) {
     if (pt.length !== 1) return;
     if (pt[0] === 0x00) {
-        if (!recvFile) return;
+        earlyChunks = [];
+        earlyEnd = false;
+        if (!recvFile) { dropStrayChunks = true; return; }
         const f = recvFile;
         recvFile = null;
         dropStrayChunks = true;
@@ -1547,11 +1675,8 @@ async function handleFileNack(pt) {
         new DataView(payload.buffer).setUint32(0, idx, false);
         payload.set(buf, 4);
         if (!sendPayload(T_FILE_CHK, payload)) return;
-        const retxViaDC = useRTC && dataChannel?.readyState === "open";
-        if (retxViaDC) {
-            while (!sendCancelled && dataChannel.bufferedAmount > 8 * 1024 * 1024) {
-                await new Promise(r => setTimeout(r, 10));
-            }
+        if (useRTC && openDcPaths().length > 0) {
+            await dcBackpressure(); // same stall-safe park as the main chunk loop
         } else {
             wsChunksInFlight++;
             if (wsChunksInFlight >= ACK_WINDOW && !sendCancelled) {
