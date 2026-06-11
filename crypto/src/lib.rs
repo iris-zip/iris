@@ -16,7 +16,7 @@ use zeroize::Zeroize;
 
 #[wasm_bindgen]
 pub struct PakeState {
-    inner: Option<Spake2<Ed25519Group>>,
+    inner: Spake2<Ed25519Group>,
     first_msg: Vec<u8>,
 }
 
@@ -28,13 +28,14 @@ impl PakeState {
     }
 }
 
+// Double-call protection lives at the FFI boundary, not here: wasm-bindgen
+// consumes the JS handle (nulls its pointer) before this body runs, so a second
+// call on the same handle throws the glue's "null pointer passed to rust"
+// TypeError. An in-struct guard could never fire (F2).
 #[wasm_bindgen]
-pub fn finish_pake(mut state: PakeState, peer_msg: &[u8]) -> Result<Vec<u8>, JsError> {
-    let inner = state
+pub fn finish_pake(state: PakeState, peer_msg: &[u8]) -> Result<Vec<u8>, JsError> {
+    state
         .inner
-        .take()
-        .ok_or_else(|| JsError::new("pake state already consumed"))?;
-    inner
         .finish(peer_msg)
         .map_err(|e| JsError::new(&format!("pake finish: {:?}", e)))
 }
@@ -180,6 +181,12 @@ pub fn hkdf_combine(
 
 #[wasm_bindgen]
 pub fn start_pake(code: &str, role: &str) -> Result<PakeState, JsError> {
+    // the protocol layer enforces a 5-digit code; this guard makes the
+    // module self-defending if reused elsewhere — an empty password must not
+    // silently produce a PAKE protected by nothing. Upper bound is sanity only.
+    if code.is_empty() || code.len() > 64 {
+        return Err(JsError::new("invalid code length"));
+    }
     let password = Password::new(code.as_bytes());
     let id_a = Identity::new(b"A");
     let id_b = Identity::new(b"B");
@@ -189,7 +196,7 @@ pub fn start_pake(code: &str, role: &str) -> Result<PakeState, JsError> {
         _ => return Err(JsError::new("invalid role: must be \"A\" or \"B\"")),
     };
     Ok(PakeState {
-        inner: Some(state),
+        inner: state,
         first_msg: msg,
     })
 }
@@ -304,6 +311,15 @@ mod tests {
 
         let ss_decaps = mlkem_decaps(dk, ct).unwrap();
         assert_eq!(ss_encaps, ss_decaps.as_slice(), "decaps must recover encaps shared secret");
+    }
+
+    // TEST-W-010 — start_pake input validation: empty/oversized code and bad role rejected
+    #[wasm_bindgen_test]
+    fn test_start_pake_input_validation() {
+        assert!(start_pake("", "A").is_err(), "empty code must be rejected");
+        assert!(start_pake(&"9".repeat(65), "A").is_err(), "oversized code must be rejected");
+        assert!(start_pake("12345", "X").is_err(), "invalid role must be rejected");
+        assert!(start_pake("12345", "A").is_ok(), "valid 5-digit code must pass");
     }
 
     // TEST-W-009 — Full handshake E2E: PAKE + X25519 + ML-KEM → identical derived keys on both sides

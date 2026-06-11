@@ -27,3 +27,4 @@ tests/browser/test-results/
 
 # Local source backups (safety copies, not part of history)
 backups/
+client/turn.json

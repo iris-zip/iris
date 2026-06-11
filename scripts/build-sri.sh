@@ -47,11 +47,16 @@ grep -q "^const CRYPTO_WASM_SRI = \"$CRYPTO_WASM_SRI\";" "$APP_JS" || { echo "fa
 APP_JS_SRI="sha384-$(sha384_b64 "$APP_JS")"
 echo "app.js       $APP_JS_SRI"
 
+# Cache-busting version tag: first 12 alphanumerics of the SRI hash. A new
+# app.js content produces a new ?v= URL, so stale edge/browser cache entries
+# can never be served against the new integrity attribute.
+APP_JS_V=$(printf "%s" "$APP_JS_SRI" | tr -cd "a-zA-Z0-9" | cut -c7-18)
+
 sed -i -E \
-    "s|<script type=\"module\" src=\"app\.js\"( integrity=\"[^\"]*\")?></script>|<script type=\"module\" src=\"app.js\" integrity=\"$APP_JS_SRI\"></script>|g" \
+    "s|<script type=\"module\" src=\"app\.js(\?v=[a-zA-Z0-9]*)?\"( integrity=\"[^\"]*\")?></script>|<script type=\"module\" src=\"app.js?v=$APP_JS_V\" integrity=\"$APP_JS_SRI\"></script>|g" \
     "$INDEX"
 
-grep -q "integrity=\"$APP_JS_SRI\"" "$INDEX" || { echo "failed to inject app.js integrity" >&2; exit 1; }
+grep -q "src=\"app.js?v=$APP_JS_V\" integrity=\"$APP_JS_SRI\"" "$INDEX" || { echo "failed to inject app.js integrity" >&2; exit 1; }
 
 echo "SRI hashes injected."
 

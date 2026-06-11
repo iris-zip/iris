@@ -849,6 +849,42 @@ img, svg { display: block; max-width: 100%; }
   text-overflow: ellipsis;
 }
 
+.bm-file-head {
+  display: flex;
+  align-items: center;
+  gap: var(--sp-2);
+}
+
+.bm-file-head .bm-file-name {
+  flex: 1;
+  min-width: 0;
+}
+
+.bm-file-cancel {
+  background: none;
+  border: 1px solid var(--border-default);
+  color: var(--fg-muted);
+  border-radius: var(--r-sm);
+  font-size: var(--t-label);
+  line-height: 1;
+  padding: 3px 7px;
+  cursor: pointer;
+  flex: none;
+}
+
+.bm-file-cancel:hover {
+  color: var(--status-err);
+  border-color: var(--status-err);
+}
+
+.bm-file-dir {
+  margin-right: var(--sp-2);
+  font-weight: 700;
+}
+
+.bm-file-dir--out { color: var(--status-warn); }
+.bm-file-dir--in  { color: var(--status-ok); }
+
 .bm-file-meta {
   font-family: var(--font-mono);
   font-size: var(--t-label);

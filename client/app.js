@@ -1,7 +1,7 @@
 // 15.4 SRI — placeholders rewritten by scripts/build-sri.sh on release build.
 // Until rewritten, runtime check short-circuits with a dev-mode warning.
 const CRYPTO_JS_SRI   = "sha384-VlqKsEfGZXBbbOzYa95XrbRww3j56CFXwTVcOi6QgO6LbUOz+N4QqjR2/j55J2Uh";
-const CRYPTO_WASM_SRI = "sha384-F7S50QslRAnCru80hagIYC+vyyoVMUYaXdlfEVZz4cgi79VXzQkMJJTVMTQDnjNo";
+const CRYPTO_WASM_SRI = "sha384-o85xZSK3Djr9z0KikYeON5OoXpxxwCNSNQZMMbYZHafJRxbxwULiciZ3qWNpLo64";
 const SRI_PLACEHOLDER_PREFIX = "__SRI_";
 
 async function sha384Base64(buf) {
@@ -11,13 +11,20 @@ async function sha384Base64(buf) {
     return btoa(bin);
 }
 
+// Cache-busting: derive a version tag from the expected SRI hash so the URL
+// changes whenever the file content changes. Old edge/browser cache entries
+// (keyed on the previous URL) can then never be served against a new hash.
+function sriVersion(sri) {
+    return sri.replace(/[^a-zA-Z0-9]/g, "").slice(0, 12);
+}
+
 async function verifyAndLoadCrypto() {
-    const jsResp = await fetch("./pkg/beem_crypto.js");
+    const jsResp = await fetch(`./pkg/beem_crypto.js?v=${sriVersion(CRYPTO_JS_SRI)}`);
     if (!jsResp.ok) throw new Error(`crypto.js fetch ${jsResp.status}`);
     const jsBytes = await jsResp.arrayBuffer();
     const jsHash  = `sha384-${await sha384Base64(jsBytes)}`;
 
-    const wasmResp = await fetch("./pkg/beem_crypto_bg.wasm");
+    const wasmResp = await fetch(`./pkg/beem_crypto_bg.wasm?v=${sriVersion(CRYPTO_WASM_SRI)}`);
     if (!wasmResp.ok) throw new Error(`wasm fetch ${wasmResp.status}`);
     const wasmBytes = await wasmResp.arrayBuffer();
     const wasmHash  = `sha384-${await sha384Base64(wasmBytes)}`;
@@ -206,6 +213,7 @@ const T_KEEPALIVE = 0x04; // WS heartbeat during DC transfers — keeps tunnel a
 const T_BYE       = 0x05; // immediate vanish signal — peer calls endChatSession() without waiting for server grace
 const T_FILE_NACK = 0x06; // missing chunk indices (uint32 BE each) — receiver→sender retransmit request
 const T_FILE_ACK  = 0x07; // chunk receipt acknowledgement — receiver→sender, one per chunk over WS relay
+const T_FILE_CANCEL = 0x08; // 16.8.2 — payload[0]: 0x00 sender aborted its outgoing file, 0x01 receiver rejects the incoming file. Always sent via WS, so it overtakes queued DC chunks.
 // WebRTC signaling — travel over existing encrypted WS relay, no server changes needed
 const T_RTC_OFFER = 0x10;
 const T_RTC_ANSWER = 0x11;
@@ -248,6 +256,14 @@ let recvCounterDC = -1n;
 let rtcPeer = null;
 let dataChannel = null;
 let useRTC = false;
+// 16.9.1 DataChannel auto-reconnect: on mid-session DC loss the sender (offerer)
+// rebuilds the peer connection with a fresh offer over WS signalling; active
+// chunk loops park on waitDcSettled() instead of silently downgrading to the
+// WS relay. Counters are NOT reset — same AEAD key, nonces must stay unique.
+const DC_RECONNECT_TRIES = 3;
+const DC_RECONNECT_OPEN_MS = 5000;
+let dcReconnecting = false;
+let dcWaiters = [];
 
 // 15.10b Cloudflare Tunnel drops WS close frames — ev.code arrives as 1006.
 // Server now prepends a "BEEM-CLOSE:<code>:<reason>" text frame before every close.
@@ -262,10 +278,18 @@ let preCloseReason = "";
 // so repeated reconnect attempts don't extend the total grace.
 const RESUME_GRACE_MS = 30_000;
 let resumeUntil = 0;
+let resumeAttempt = 0;   // backoff step within the current grace window
+let resumeTimer = null;
 let wsKeepaliveTimer = null;
 let wakeLock = null;
 
 const COUNTER_MAX = (1n << 64n) - 1n;
+
+// mirror of server MAX_WS_FRAME (200 KiB). The server enforces this on relayed
+// traffic, but the relay itself is untrusted — cap incoming frames client-side
+// before decrypt so a hostile relay/peer can't force a giant allocation. Largest
+// legitimate frame is a 128 KiB chunk + 29 B crypto overhead.
+const MAX_FRAME = 200 * 1024;
 
 // transport: 0 = WebSocket, 1 = DataChannel — byte 3 of nonce separates counter spaces
 function makeNonce(counter, transport = 0) {
@@ -545,7 +569,7 @@ function openWs(code, resume = false) {
         if (step === "chat") {
             if (!(e.data instanceof ArrayBuffer)) return;
             const frame = new Uint8Array(e.data);
-            if (frame.length < 1 + 12) return;
+            if (frame.length < 1 + 12 || frame.length > MAX_FRAME) return;
             const type  = frame[0];
             const nonce = frame.slice(1, 13);
             const ct    = frame.slice(13);
@@ -803,7 +827,10 @@ function setChatChip(tone, text) {
 // stays in JS memory across tab freeze, so the reopened socket goes straight
 // into chat mode. If grace runs out, admit the disconnect for real.
 function attemptResume() {
-    if (resumeUntil === 0) resumeUntil = Date.now() + RESUME_GRACE_MS;
+    if (resumeUntil === 0) {
+        resumeUntil = Date.now() + RESUME_GRACE_MS;
+        resumeAttempt = 0;
+    }
     if (Date.now() > resumeUntil) {
         resumeUntil = 0;
         appendSystemMsg("(peer disconnected)");
@@ -814,7 +841,19 @@ function attemptResume() {
     if (!useRTC || dataChannel?.readyState !== "open") {
         setChatChip("warn", "Reconnecting…");
     }
-    openWs(currentCode, true);
+    // Backoff 0s/3s/6s/12s (~4 attempts per grace window). Each failed connect
+    // closes instantly and re-enters here; without spacing that hammers the
+    // server and walks our own IP up the cooldown→ban ladder (5 attempts/60s
+    // trips a cooldown).
+    const delay = resumeAttempt === 0 ? 0 : Math.min(3000 * 2 ** (resumeAttempt - 1), 12_000);
+    resumeAttempt += 1;
+    if (resumeTimer !== null) clearTimeout(resumeTimer);
+    resumeTimer = setTimeout(() => {
+        resumeTimer = null;
+        if (step !== "chat") return;                        // session ended while waiting
+        if (ws && ws.readyState === WebSocket.OPEN) return; // already resumed (visibility race)
+        openWs(currentCode, true);
+    }, delay);
 }
 
 // 15.9 Peer gone / session ended: disable inputs, flip the header chip to err tone.
@@ -822,6 +861,7 @@ function endChatSession() {
     step = null;
     useRTC = false;
     drainAckWaiters(); // unblock any sendFile/handleFileNack loop waiting on ACK
+    settleDcReconnect(); // abandon any in-flight DC rebuild + wake parked loops (16.9.1)
     stopWsKeepalive();
     releaseWakeLock();
     if (dataChannel) { dataChannel.close(); dataChannel = null; }
@@ -854,6 +894,7 @@ function _doVanish() {
     step = null;
     useRTC = false;
     drainAckWaiters();
+    settleDcReconnect(); // 16.9.1: abandon any DC rebuild + wake parked loops
     stopWsKeepalive();
     releaseWakeLock();
     try { ws && ws.close(); } catch (_) {}
@@ -893,12 +934,30 @@ if (fatalRetryBtn) fatalRetryBtn.addEventListener("click", () => location.reload
 // until the remote description is set, then flush.
 let pendingIce = [];
 
+// Self-hosted STUN/TURN: /turn.json exists only where TURN is configured
+// (gitignored) so the relay address never enters the repo. Shape:
+// { "urls": ["stun:host:3478", "turn:host:3478?transport=udp"], "username": "...", "credential": "..." }
+// Absent or malformed → fall back to Google STUN (local dev / CI unchanged).
+// A tampered turn.json can only redirect the relay path, which is untrusted by
+// design — media stays E2E encrypted — so this file needs no SRI pin.
+let turnConfig = null;
+fetch("./turn.json")
+    .then(r => (r.ok ? r.json() : null))
+    .then(j => {
+        if (j && Array.isArray(j.urls) && j.urls.every(u => typeof u === "string")
+            && typeof j.username === "string" && typeof j.credential === "string") {
+            turnConfig = j;
+        }
+    })
+    .catch(() => {});
+
 function setupWebRTC() {
     if (typeof RTCPeerConnection === "undefined") return;
     pendingIce = [];
-    const cfg = { iceServers: [
-        { urls: "stun:stun.l.google.com:19302" }
-    ]};
+    const cfg = { iceServers: turnConfig
+        ? [{ urls: turnConfig.urls, username: turnConfig.username, credential: turnConfig.credential }]
+        : [{ urls: "stun:stun.l.google.com:19302" }]
+    };
     rtcPeer = new RTCPeerConnection(cfg);
 
     rtcPeer.onicecandidate = (e) => {
@@ -927,6 +986,7 @@ function setupWebRTC() {
 function wireDataChannel(dc) {
     dc.onopen = async () => {
         useRTC = true;
+        if (dcReconnecting) settleDcReconnect(); // unpark chunk loops on the rebuilt channel
         let label = "Direct";
         try {
             const stats = await rtcPeer.getStats();
@@ -943,12 +1003,12 @@ function wireDataChannel(dc) {
         } catch (_) {}
         appendSystemMsg(`${label} connection — server bypassed`);
     };
-    dc.onclose = () => { useRTC = false; if (step === "chat") appendSystemMsg("(direct connection closed — fell back to relay)"); };
+    dc.onclose = () => handleDcClose();
     dc.onerror = () => { useRTC = false; };
     dc.onmessage = (e) => {
         if (!(e.data instanceof ArrayBuffer)) return;
         const buf = new Uint8Array(e.data);
-        if (buf.length < 13) return;
+        if (buf.length < 13 || buf.length > MAX_FRAME) return;
         const type = buf[0];
         const nonce = buf.slice(1, 13);
         if (nonce[3] !== 1) return;
@@ -959,6 +1019,54 @@ function wireDataChannel(dc) {
         recvCounterDC = dcCounter;
         handleChatPayload(type, pt);
     };
+}
+
+// 16.9.1 — DC loss during an active session: rebuild P2P instead of permanently
+// downgrading to the WS relay. Only the sender can offer; the receiver parks
+// until the sender's reconnect offer reopens the channel or the window lapses.
+function drainDcWaiters() {
+    const w = dcWaiters;
+    dcWaiters = [];
+    for (const r of w) r();
+}
+function settleDcReconnect() {
+    dcReconnecting = false;
+    drainDcWaiters();
+}
+function waitDcSettled() {
+    if (!dcReconnecting) return Promise.resolve();
+    return new Promise(r => dcWaiters.push(r));
+}
+function handleDcClose() {
+    useRTC = false;
+    if (step !== "chat" || dcReconnecting) return; // teardown, or already rebuilding
+    dcReconnecting = true;
+    appendSystemMsg("(direct connection lost — reconnecting…)");
+    if (role === "sender") {
+        rebuildRTC();
+    } else {
+        // Bounded park covering the sender's full retry budget, plus slack.
+        setTimeout(() => {
+            if (!dcReconnecting) return;
+            settleDcReconnect();
+            if (step === "chat") appendSystemMsg("(direct reconnect failed — using relay)");
+        }, DC_RECONNECT_TRIES * DC_RECONNECT_OPEN_MS + 2000);
+    }
+}
+async function rebuildRTC() {
+    for (let i = 0; i < DC_RECONNECT_TRIES && step === "chat"; i++) {
+        try { rtcPeer?.close(); } catch (_) {}
+        rtcPeer = null;
+        dataChannel = null;
+        setupWebRTC(); // fresh peer + channel + offer over WS signalling
+        const deadline = Date.now() + DC_RECONNECT_OPEN_MS;
+        while (Date.now() < deadline && step === "chat" && dataChannel?.readyState !== "open") {
+            await new Promise(r => setTimeout(r, 100));
+        }
+        if (dataChannel?.readyState === "open") { settleDcReconnect(); return; }
+    }
+    settleDcReconnect();
+    if (step === "chat") appendSystemMsg("(direct reconnect failed — using relay)");
 }
 
 function sendSignal(type, jsonStr) {
@@ -981,6 +1089,14 @@ async function handleRTCSignal(type, pt) {
     if (!rtcPeer) return;
     const msg = JSON.parse(textDec.decode(pt));
     if (type === T_RTC_OFFER) {
+        if (rtcPeer.remoteDescription) {
+            // 16.9.1 reconnect offer — the old peer connection is dead; rebuild
+            try { rtcPeer.close(); } catch (_) {}
+            rtcPeer = null;
+            dataChannel = null;
+            useRTC = false;
+            setupWebRTC();
+        }
         await rtcPeer.setRemoteDescription(msg);
         await flushPendingIce();
         const answer = await rtcPeer.createAnswer();
@@ -1059,6 +1175,7 @@ function handleChatPayload(type, pt) {
     }
     if (type === T_FILE_NACK) { handleFileNack(pt); return; }
     if (type === T_FILE_ACK)  { ackReceived(); return; }
+    if (type === T_FILE_CANCEL) { handleFileCancel(pt); return; }
     if (type === T_KEEPALIVE) return;
     if (type === T_BYE) { endChatSession(); return; }
     appendSystemMsg(`(unknown frame type 0x${type.toString(16)})`);
@@ -1089,13 +1206,35 @@ function fmtBytes(n) {
     return `${(n / 1024 / 1024).toFixed(2)} MB`;
 }
 
-function appendFileRow(name, sizeBytes, direction) {
+function appendFileRow(name, sizeBytes, direction, onCancel) {
     const row = document.createElement("div");
     row.className = "bm-file-row";
 
     const nameEl = document.createElement("div");
     nameEl.className = "bm-file-name";
-    nameEl.textContent = name;
+    // 16.8.1 direction badge — ↑ sending / ↓ receiving, so concurrent transfers
+    // in both directions are distinguishable at a glance
+    const dirEl = document.createElement("span");
+    dirEl.className = `bm-file-dir bm-file-dir--${direction}`;
+    dirEl.textContent = direction === "out" ? "↑" : "↓";
+    nameEl.appendChild(dirEl);
+    nameEl.appendChild(document.createTextNode(name));
+
+    // 16.8.2 — cancel button lives in a head line beside the name; removed by
+    // completeFileRow/failFileRow once the transfer reaches a terminal state.
+    const head = document.createElement("div");
+    head.className = "bm-file-head";
+    head.appendChild(nameEl);
+    let cancelBtn = null;
+    if (onCancel) {
+        cancelBtn = document.createElement("button");
+        cancelBtn.type = "button";
+        cancelBtn.className = "bm-file-cancel";
+        cancelBtn.textContent = "✕";
+        cancelBtn.title = "Cancel transfer";
+        cancelBtn.addEventListener("click", onCancel);
+        head.appendChild(cancelBtn);
+    }
 
     const meta = document.createElement("div");
     meta.className = "bm-file-meta";
@@ -1108,13 +1247,20 @@ function appendFileRow(name, sizeBytes, direction) {
     fill.style.width = "0%";
     progress.appendChild(fill);
 
-    row.appendChild(nameEl);
+    row.appendChild(head);
     row.appendChild(meta);
     row.appendChild(progress);
 
     $("chat-log").appendChild(row);
     row.scrollIntoView({ block: "end" });
-    return { row, meta, fill };
+    return { row, meta, fill, cancelBtn };
+}
+
+function removeCancelBtn(refs) {
+    if (refs && refs.cancelBtn) {
+        refs.cancelBtn.remove();
+        refs.cancelBtn = null;
+    }
 }
 
 function updateFileRow(refs, doneBytes, totalBytes, label, speedBps) {
@@ -1125,12 +1271,14 @@ function updateFileRow(refs, doneBytes, totalBytes, label, speedBps) {
 }
 
 function completeFileRow(refs, totalBytes, finalLabel) {
+    removeCancelBtn(refs);
     refs.fill.style.width = "100%";
     refs.fill.classList.add("bm-progress-fill--complete");
     refs.meta.textContent = `${finalLabel} \u00b7 ${fmtBytes(totalBytes)}`;
 }
 
 function failFileRow(refs, message) {
+    removeCancelBtn(refs);
     refs.meta.textContent = message;
 }
 
@@ -1158,13 +1306,30 @@ async function sendFile(file) {
     hdr.set(nameBytes, 10);
     if (!sendPayload(T_FILE_HDR, hdr)) return;
 
-    const refs = appendFileRow(file.name, file.size, "out");
+    sendCancelled = false;
+    sendCancelMsg = "";
+    const refs = appendFileRow(file.name, file.size, "out", () => {
+        if (sendCancelled) return;
+        sendCancelled = true;
+        sendCancelMsg = "Cancelled";
+        sendPayload(T_FILE_CANCEL, new Uint8Array([0x00])); // tell peer to discard its partial
+        drainAckWaiters(); // wake a parked window wait so the loop can observe the flag
+        drainDcWaiters();  // likewise a loop parked on a DC reconnect (16.9.1)
+    });
+    currentSendRefs = refs;
     const totalChunks = Math.max(1, Math.ceil(file.size / CHUNK_SIZE));
     let sentBytes = 0;
     // Sliding 1-second window: array of [timestamp, bytes] samples
     let speedSamples = [];
 
     for (let i = 0; i < totalChunks; i++) {
+        if (sendCancelled) break;
+        // 16.9.1: DC dropped mid-transfer — park until the rebuild settles
+        // (reopened → resume via DC; gave up → chunks route via WS below).
+        if (dcReconnecting) {
+            await waitDcSettled();
+            if (sendCancelled) break;
+        }
         const offset = i * CHUNK_SIZE;
         const slice = file.slice(offset, Math.min(file.size, offset + CHUNK_SIZE));
         const buf = new Uint8Array(await slice.arrayBuffer());
@@ -1173,6 +1338,7 @@ async function sendFile(file) {
         payload.set(buf, 4);
         if (!sendPayload(T_FILE_CHK, payload)) {
             failFileRow(refs, `Send aborted at chunk ${i}`);
+            currentSendRefs = null;
             return;
         }
         sentBytes += buf.length;
@@ -1185,15 +1351,16 @@ async function sendFile(file) {
         // DC (P2P/LAN): SCTP congestion control handles it; just cap OOM risk.
         const chunkViaDC = useRTC && dataChannel?.readyState === "open";
         if (chunkViaDC) {
-            while (dataChannel.bufferedAmount > 8 * 1024 * 1024) {
+            while (!sendCancelled && dataChannel.bufferedAmount > 8 * 1024 * 1024) {
                 await new Promise(r => setTimeout(r, 10));
             }
         } else {
             wsChunksInFlight++;
-            if (wsChunksInFlight >= ACK_WINDOW) {
+            if (wsChunksInFlight >= ACK_WINDOW && !sendCancelled) {
                 await new Promise(r => ackResolvers.push(r));
             }
         }
+        if (sendCancelled) break;
         if ((i & 0x0f) === 0 || i === totalChunks - 1) {
             const t = Date.now();
             speedSamples = speedSamples.filter(s => t - s[0] <= 1000);
@@ -1201,6 +1368,12 @@ async function sendFile(file) {
             updateFileRow(refs, sentBytes, file.size, "Sending", bps);
             await new Promise(r => setTimeout(r, 0));
         }
+    }
+    currentSendRefs = null;
+    if (sendCancelled) {
+        failFileRow(refs, sendCancelMsg || "Cancelled");
+        drainAckWaiters(); // clear in-flight count; stray late ACKs floor at 0 in ackReceived
+        return;
     }
     lastSentFile = file; // held so handleFileNack can re-read slices on retransmit request
     sendPayload(T_FILE_END, new Uint8Array(0));
@@ -1234,6 +1407,11 @@ function drainAckWaiters() {
 let recvFile = null; // { name, size, totalChunks, nackAttempts, parts: Uint8Array[], received: number, refs }
 // Sender-side: held after sendFile completes so handleFileNack can re-read slices
 let lastSentFile = null;
+// 16.8.2 cancel state
+let sendCancelled = false;   // observed by the sendFile/handleFileNack loops; reset at sendFile start
+let sendCancelMsg = "";      // terminal row label ("Cancelled" vs "Cancelled by peer")
+let currentSendRefs = null;  // outgoing row refs so a peer-initiated cancel can mark the card
+let dropStrayChunks = false; // after an incoming cancel, late in-flight chunks are expected — drop them silently
 
 function handleFileHdr(pt) {
     if (pt.length < 10) { appendSystemMsg("(bad file header)"); return; }
@@ -1242,12 +1420,23 @@ function handleFileHdr(pt) {
     const nameLen = v.getUint16(8, false);
     if (pt.length !== 10 + nameLen) { appendSystemMsg("(bad file header)"); return; }
     const name = textDec.decode(pt.slice(10, 10 + nameLen));
-    const refs = appendFileRow(name, size, "in");
+    dropStrayChunks = false; // new transfer — stray-chunk reporting is meaningful again
+    const refs = appendFileRow(name, size, "in", () => {
+        if (!recvFile || recvFile.refs !== refs) return; // stale button (already terminal)
+        const f = recvFile;
+        recvFile = null;
+        dropStrayChunks = true; // chunks already in flight will keep landing — expected
+        sendPayload(T_FILE_CANCEL, new Uint8Array([0x01])); // tell sender to stop
+        failFileRow(f.refs, "Cancelled");
+    });
     recvFile = { name, size, totalChunks: Math.max(1, Math.ceil(size / CHUNK_SIZE)), nackAttempts: 0, parts: [], received: 0, refs, speedSamples: [] };
 }
 
 function handleFileChunk(pt) {
-    if (!recvFile) { appendSystemMsg("(chunk without header)"); return; }
+    if (!recvFile) {
+        if (!dropStrayChunks) appendSystemMsg("(chunk without header)");
+        return;
+    }
     if (pt.length < 4) return;
     const idx = new DataView(pt.buffer, pt.byteOffset, pt.byteLength).getUint32(0, false);
     const data = pt.slice(4);
@@ -1315,6 +1504,29 @@ async function handleFileEnd() {
     } catch (_) {}
 }
 
+// 16.8.2 — peer cancelled a transfer. payload[0]: 0x00 = peer aborted the file
+// it was sending to us (discard our partial); 0x01 = peer rejects the file we
+// are sending (stop the loop; forget the file so NACK rounds can't resurrect it).
+function handleFileCancel(pt) {
+    if (pt.length !== 1) return;
+    if (pt[0] === 0x00) {
+        if (!recvFile) return;
+        const f = recvFile;
+        recvFile = null;
+        dropStrayChunks = true;
+        failFileRow(f.refs, "Cancelled by peer");
+        return;
+    }
+    if (pt[0] === 0x01) {
+        sendCancelled = true;
+        sendCancelMsg = "Cancelled by peer";
+        lastSentFile = null; // a NACK round after this must not resurrect the transfer
+        if (currentSendRefs) failFileRow(currentSendRefs, "Cancelled by peer");
+        drainAckWaiters(); // unpark the send loop so it can observe the flag
+        drainDcWaiters();  // likewise a loop parked on a DC reconnect (16.9.1)
+    }
+}
+
 // Sender-side: receiver asked us to re-send specific chunks.
 // Reads only the requested slices from the original File object and re-sends them,
 // then fires T_FILE_END so the receiver can try assembly again.
@@ -1323,7 +1535,10 @@ async function handleFileNack(pt) {
     const count = pt.length / 4;
     const dv = new DataView(pt.buffer, pt.byteOffset, pt.byteLength);
     for (let j = 0; j < count; j++) {
-        if (step !== "chat") return;
+        if (dcReconnecting) await waitDcSettled(); // 16.9.1: same park as the main loop
+        // lastSentFile re-checked each pass: a T_FILE_CANCEL (0x01) arriving
+        // mid-round nulls it and sets sendCancelled (16.8.2)
+        if (step !== "chat" || sendCancelled || !lastSentFile) return;
         const idx = dv.getUint32(j * 4, false);
         const offset = idx * CHUNK_SIZE;
         const slice = lastSentFile.slice(offset, Math.min(lastSentFile.size, offset + CHUNK_SIZE));
@@ -1334,16 +1549,17 @@ async function handleFileNack(pt) {
         if (!sendPayload(T_FILE_CHK, payload)) return;
         const retxViaDC = useRTC && dataChannel?.readyState === "open";
         if (retxViaDC) {
-            while (dataChannel.bufferedAmount > 8 * 1024 * 1024) {
+            while (!sendCancelled && dataChannel.bufferedAmount > 8 * 1024 * 1024) {
                 await new Promise(r => setTimeout(r, 10));
             }
         } else {
             wsChunksInFlight++;
-            if (wsChunksInFlight >= ACK_WINDOW) {
+            if (wsChunksInFlight >= ACK_WINDOW && !sendCancelled) {
                 await new Promise(r => ackResolvers.push(r));
             }
         }
     }
+    if (sendCancelled) return;
     sendPayload(T_FILE_END, new Uint8Array(0));
 }
 
