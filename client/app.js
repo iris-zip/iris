@@ -214,6 +214,7 @@ const T_BYE       = 0x05; // immediate vanish signal — peer calls endChatSessi
 const T_FILE_NACK = 0x06; // missing chunk indices (uint32 BE each) — receiver→sender retransmit request
 const T_FILE_ACK  = 0x07; // chunk receipt acknowledgement — receiver→sender, one per chunk over WS relay
 const T_FILE_CANCEL = 0x08; // 16.8.2 — payload[0]: 0x00 sender aborted its outgoing file, 0x01 receiver rejects the incoming file. Always sent via WS, so it overtakes queued DC chunks.
+const T_FILE_DONE = 0x09; // delivery confirmation — receiver→sender after successful assembly; flips the sender row "Sent" → "Delivered"
 // WebRTC signaling — travel over existing encrypted WS relay, no server changes needed
 const T_RTC_OFFER = 0x10;
 const T_RTC_ANSWER = 0x11;
@@ -1022,7 +1023,11 @@ function closeAllDcPaths() {
 // DC_STALL_MS — the dead-route case (VPN drop, WiFi toggle) where readyState
 // stays "open" and onclose never fires. Baseline resets on every observed
 // drain; sends raising the buffer move the baseline without resetting the clock.
-const DC_BUFFER_CAP = 8 * 1024 * 1024;
+// Per-path high-water mark. BDP on the worst real path (~3 MB/s × ~130 ms) is
+// ~400 KB, so 2 MB never starves the pipe — but it caps queued-yet-undelivered
+// RAM at ~8 MB across 4 paths (the old 8 MB cap let "100%" run ~32–40 MB ahead
+// of the receiver in the field).
+const DC_BUFFER_CAP = 2 * 1024 * 1024;
 const DC_STALL_MS = 5000;
 function dcPathStalled(p, now) {
     const b = p.dc.bufferedAmount;
@@ -1173,6 +1178,38 @@ async function dcBackpressure() {
     }
 }
 
+// Sum of bytes queued in the open path buffers — sent from the app's view but
+// not yet handed to the network. Subtracted from displayed progress so the bar
+// reflects bytes that actually left this machine.
+function dcBufferedTotal() {
+    let b = 0;
+    for (const p of openDcPaths()) b += p.dc.bufferedAmount;
+    return b;
+}
+
+// Post-loop drain: "Sent" must mean the buffers are empty, not "chunks queued
+// in RAM" (field: at "100%" the receiver was ~40 MB behind and a kill-chat at
+// that moment destroyed the tail). Stalled paths are closed — their queued
+// chunks are lost, but the receiver's NACK round at T_FILE_END repairs that.
+// Returns on cancel or reconnect too; both leave nothing more to drain here.
+async function dcDrainBuffers(refs, sentBytes, totalBytes) {
+    while (!sendCancelled && !dcReconnecting) {
+        const now = Date.now();
+        let buffered = 0;
+        for (const p of openDcPaths()) {
+            if (dcPathStalled(p, now)) {
+                try { p.dc.close(); } catch (_) {}
+                handleDcPathClose(p);
+                continue;
+            }
+            buffered += p.dc.bufferedAmount;
+        }
+        if (buffered === 0) return;
+        updateFileRow(refs, Math.max(0, sentBytes - buffered), totalBytes, "Sending", 0);
+        await new Promise(r => setTimeout(r, 100));
+    }
+}
+
 function sendSignal(type, jsonStr) {
     // Signaling goes over WS relay even when useRTC is true
     if (!ws || ws.readyState !== WebSocket.OPEN) return;
@@ -1288,6 +1325,7 @@ function handleChatPayload(type, pt) {
     if (type === T_FILE_NACK) { handleFileNack(pt); return; }
     if (type === T_FILE_ACK)  { ackReceived(); return; }
     if (type === T_FILE_CANCEL) { handleFileCancel(pt); return; }
+    if (type === T_FILE_DONE) { handleFileDone(); return; }
     if (type === T_KEEPALIVE) return;
     if (type === T_BYE) { endChatSession(); return; }
     appendSystemMsg(`(unknown frame type 0x${type.toString(16)})`);
@@ -1420,6 +1458,7 @@ async function sendFile(file) {
 
     sendCancelled = false;
     sendCancelMsg = "";
+    pendingDelivery = null; // a new transfer supersedes the previous confirmation
     const refs = appendFileRow(file.name, file.size, "out", () => {
         if (sendCancelled) return;
         sendCancelled = true;
@@ -1449,9 +1488,20 @@ async function sendFile(file) {
         new DataView(payload.buffer).setUint32(0, i, false);
         payload.set(buf, 4);
         if (!sendPayload(T_FILE_CHK, payload)) {
-            failFileRow(refs, `Send aborted at chunk ${i}`);
-            currentSendRefs = null;
-            return;
+            // Mobile WS blips mid-send and reopens within the resume grace —
+            // park and retry this chunk instead of aborting the whole transfer.
+            const retryUntil = Date.now() + RESUME_GRACE_MS + 5000;
+            let sent = false;
+            while (!sent && !sendCancelled && step === "chat" && Date.now() < retryUntil) {
+                await new Promise(r => setTimeout(r, 250));
+                sent = sendPayload(T_FILE_CHK, payload);
+            }
+            if (sendCancelled) break;
+            if (!sent) {
+                failFileRow(refs, `Send aborted at chunk ${i}`);
+                currentSendRefs = null;
+                return;
+            }
         }
         sentBytes += buf.length;
         const now = Date.now();
@@ -1474,10 +1524,11 @@ async function sendFile(file) {
             const t = Date.now();
             speedSamples = speedSamples.filter(s => t - s[0] <= 1000);
             const bps = speedSamples.reduce((a, s) => a + s[1], 0);
-            updateFileRow(refs, sentBytes, file.size, "Sending", bps);
+            updateFileRow(refs, Math.max(0, sentBytes - dcBufferedTotal()), file.size, "Sending", bps);
             await new Promise(r => setTimeout(r, 0));
         }
     }
+    if (!sendCancelled) await dcDrainBuffers(refs, sentBytes, file.size);
     currentSendRefs = null;
     if (sendCancelled) {
         failFileRow(refs, sendCancelMsg || "Cancelled");
@@ -1486,7 +1537,9 @@ async function sendFile(file) {
     }
     lastSentFile = file; // held so handleFileNack can re-read slices on retransmit request
     sendPayload(T_FILE_END, new Uint8Array(0));
-    completeFileRow(refs, file.size, "Sent");
+    removeCancelBtn(refs);
+    updateFileRow(refs, file.size, file.size, "Sent", 0);
+    pendingDelivery = { refs, size: file.size }; // green "Delivered" only on T_FILE_DONE
     try {
         const cs = await fileChecksum(await file.arrayBuffer());
         appendSystemMsg(`SHA-256: ${cs}`);
@@ -1516,6 +1569,8 @@ function drainAckWaiters() {
 let recvFile = null; // { name, size, totalChunks, nackAttempts, parts: Uint8Array[], received: number, refs }
 // Sender-side: held after sendFile completes so handleFileNack can re-read slices
 let lastSentFile = null;
+// Sender-side: { refs, size } after T_FILE_END — handleFileDone flips it to "Delivered"
+let pendingDelivery = null;
 // 16.8.2 cancel state
 let sendCancelled = false;   // observed by the sendFile/handleFileNack loops; reset at sendFile start
 let sendCancelMsg = "";      // terminal row label ("Cancelled" vs "Cancelled by peer")
@@ -1614,6 +1669,7 @@ async function handleFileEnd() {
     const url = URL.createObjectURL(blob);
 
     completeFileRow(f.refs, f.size, "Received");
+    sendPayload(T_FILE_DONE, new Uint8Array(0)); // assembly verified — confirm delivery to the sender
 
     // Replace meta with a download anchor inside the existing row.
     f.refs.meta.textContent = "";
@@ -1628,6 +1684,14 @@ async function handleFileEnd() {
         const cs = await fileChecksum(await blob.arrayBuffer());
         appendSystemMsg(`SHA-256: ${cs}`);
     } catch (_) {}
+}
+
+// Receiver confirmed assembly (T_FILE_DONE) — the only point where the sender
+// may claim more than "Sent". A stray DONE with nothing pending is dropped.
+function handleFileDone() {
+    if (!pendingDelivery) return;
+    completeFileRow(pendingDelivery.refs, pendingDelivery.size, "Delivered");
+    pendingDelivery = null;
 }
 
 // 16.8.2 — peer cancelled a transfer. payload[0]: 0x00 = peer aborted the file
@@ -1650,6 +1714,8 @@ function handleFileCancel(pt) {
         sendCancelMsg = "Cancelled by peer";
         lastSentFile = null; // a NACK round after this must not resurrect the transfer
         if (currentSendRefs) failFileRow(currentSendRefs, "Cancelled by peer");
+        else if (pendingDelivery) failFileRow(pendingDelivery.refs, "Cancelled by peer"); // rejected during a post-"Sent" NACK round
+        pendingDelivery = null;
         drainAckWaiters(); // unpark the send loop so it can observe the flag
         drainDcWaiters();  // likewise a loop parked on a DC reconnect (16.9.1)
     }
