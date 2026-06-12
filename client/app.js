@@ -253,8 +253,45 @@ let recvCounterWS = -1n; // per-transport strictly increasing; prevents cross-tr
 // 16.9.2: one counter pair per DC path; nonce[3] = 1 + pathId keeps the four
 // counter spaces disjoint from each other and from WS (0x00) — no nonce reuse
 // across paths even though every path encrypts under the same directional key.
+// 16.9.5: DC paths are ordered:false, so frames legitimately arrive out of
+// order WITHIN a path — strict-greater would drop the late ones. recvCountersDC
+// is now the highest-seen watermark per path; recvMasksDC is a sliding bitmap
+// (DTLS/IPsec style) of the REPLAY_WINDOW counters below it: bit d set means
+// counter (watermark − d) was already accepted.
 let sendCountersDC = [0n, 0n, 0n, 0n];
 let recvCountersDC = [-1n, -1n, -1n, -1n];
+let recvMasksDC = [0n, 0n, 0n, 0n];
+
+// Window depth: reorder span on a path is bounded by what's in flight there
+// (DC_BUFFER_CAP 2 MB ≈ 16 chunk frames + network BDP) — 1024 is ~60× that.
+const REPLAY_WINDOW = 1024n;
+const REPLAY_MASK_ALL = (1n << REPLAY_WINDOW) - 1n;
+
+// Pre-decrypt gate: true if this counter could be fresh (ahead of the
+// watermark, or inside the window and not yet seen). Cheap reject for replays.
+function dcReplayFresh(pid, c) {
+    const high = recvCountersDC[pid];
+    if (c > high) return true;
+    const d = high - c;
+    if (d >= REPLAY_WINDOW) return false; // older than the window tracks — drop
+    return ((recvMasksDC[pid] >> d) & 1n) === 0n;
+}
+
+// Record an accepted counter. Call ONLY after the frame authenticated
+// (decrypt succeeded) — otherwise forged counters could race the watermark
+// forward and the window would drop the legitimate frames behind it (DoS).
+function dcReplayMark(pid, c) {
+    const high = recvCountersDC[pid];
+    if (c > high) {
+        const shift = c - high;
+        recvMasksDC[pid] = shift >= REPLAY_WINDOW
+            ? 1n
+            : ((recvMasksDC[pid] << shift) | 1n) & REPLAY_MASK_ALL;
+        recvCountersDC[pid] = c;
+    } else {
+        recvMasksDC[pid] |= 1n << (high - c);
+    }
+}
 
 // WebRTC direct channels — set up after PAKE completes, falls back to WS relay silently.
 // 16.9.2 parallel striping: N independent peer connections (separate SCTP
@@ -509,6 +546,7 @@ function openWs(code, resume = false) {
         recvCounterWS = -1n;
         sendCountersDC = [0n, 0n, 0n, 0n];
         recvCountersDC = [-1n, -1n, -1n, -1n];
+        recvMasksDC = [0n, 0n, 0n, 0n];
         drainAckWaiters();
     }
     preCloseCode = 0;
@@ -914,6 +952,7 @@ function _doVanish() {
     recvCounterWS = -1n;
     sendCountersDC = [0n, 0n, 0n, 0n];
     recvCountersDC = [-1n, -1n, -1n, -1n];
+    recvMasksDC = [0n, 0n, 0n, 0n];
     role = currentCode = null;
     $("chat-log").innerHTML = "";
     $("chat-input").value = "";
@@ -985,7 +1024,11 @@ function newDcPath(k) {
 
 function createSenderPath(k) {
     const path = newDcPath(k);
-    path.dc = path.pc.createDataChannel("beem-" + k, { ordered: true });
+    // 16.9.5 ordered:false (still reliable): one lost packet no longer freezes
+    // the whole path for a retransmit RTT (SCTP head-of-line blocking) — bench
+    // measured +60% on the lossy mobile relay path. Receiver reassembles by
+    // chunk index; anti-replay handles the reorder via the sliding window.
+    path.dc = path.pc.createDataChannel("beem-" + k, { ordered: false });
     path.dc.binaryType = "arraybuffer";
     wireDataChannel(path);
     path.pc.createOffer().then(offer => {
@@ -1093,14 +1136,16 @@ function wireDataChannel(path) {
         const nonce = buf.slice(1, 13);
         // 16.9.2: counter space indexed by the nonce transport byte (1 + pathId),
         // NOT by arrival channel — a frame replayed onto a different path still
-        // lands in its original counter space and dies on the strict-greater check.
+        // lands in its original counter space and dies in the replay window.
         const pid = nonce[3] - 1;
         if (pid < 0 || pid >= DC_PATHS) return;
         const dcCounter = new DataView(nonce.buffer, nonce.byteOffset, 12).getBigUint64(4, false);
-        if (dcCounter <= recvCountersDC[pid]) return;
+        // 16.9.5 sliding window (unordered DC): reordered-but-fresh passes,
+        // replays and beyond-window frames drop before paying for a decrypt.
+        if (!dcReplayFresh(pid, dcCounter)) return;
         let pt;
         try { pt = decrypt(recvKey, nonce, buf.slice(13)); } catch (_) { return; }
-        recvCountersDC[pid] = dcCounter;
+        dcReplayMark(pid, dcCounter); // authenticated — only now may it move the window
         handleChatPayload(type, pt);
     };
 }
@@ -1644,6 +1689,18 @@ async function handleFileEnd() {
         return;
     }
     const f = recvFile;
+    // 16.9.5 unordered DC: a tiny END routinely overtakes large fragmented
+    // chunks still in flight on its path (unordered = deliver-on-assembly),
+    // so "missing at END" usually means "still arriving". One short grace
+    // before each NACK round keeps transfers from always ending in a spurious
+    // repair; genuine loss (closed path) just repairs 1 s later. The flag
+    // stays set through the grace re-entry (clearing it there would loop the
+    // grace forever) and re-arms after each NACK so every round gets one.
+    if (f.received !== f.size && step === "chat" && !f.endGraceSpent) {
+        f.endGraceSpent = true;
+        setTimeout(() => { if (recvFile === f) handleFileEnd(); }, 1000);
+        return;
+    }
     if (f.received !== f.size && f.nackAttempts < 3 && step === "chat") {
         const missing = [];
         for (let i = 0; i < f.totalChunks; i++) {
@@ -1651,6 +1708,7 @@ async function handleFileEnd() {
         }
         if (missing.length > 0) {
             f.nackAttempts++;
+            f.endGraceSpent = false; // fresh grace for the retransmit round's END
             // Keep recvFile alive \u2014 retransmitted chunks + new T_FILE_END will arrive
             const nackBuf = new Uint8Array(missing.length * 4);
             const dv = new DataView(nackBuf.buffer);
