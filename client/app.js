@@ -987,7 +987,9 @@ if (fatalRetryBtn) fatalRetryBtn.addEventListener("click", () => location.reload
 // A tampered turn.json can only redirect the relay path, which is untrusted by
 // design — media stays E2E encrypted — so this file needs no SRI pin.
 let turnConfig = null;
-fetch("./turn.json")
+// no-store: relay config must always be current — a cached copy silently pins
+// clients to a retired relay lane
+fetch("./turn.json", { cache: "no-store" })
     .then(r => (r.ok ? r.json() : null))
     .then(j => {
         if (j && Array.isArray(j.urls) && j.urls.every(u => typeof u === "string")
@@ -1362,7 +1364,7 @@ function handleChatPayload(type, pt) {
     }
     if (type === T_FILE_HDR) { handleFileHdr(pt); return; }
     if (type === T_FILE_CHK) { handleFileChunk(pt); return; }
-    if (type === T_FILE_END) { handleFileEnd(); return; }
+    if (type === T_FILE_END) { handleFileEnd(pt); return; }
     if (type === T_RTC_OFFER || type === T_RTC_ANSWER || type === T_RTC_ICE) {
         handleRTCSignal(type, pt);
         return;
@@ -1485,21 +1487,32 @@ const MAX_WS_BUFFER = 512 * 1024; // pause sending when browser send buffer exce
 // Sender-side
 async function sendFile(file) {
     if (step !== "chat") return;
+    // 16.9.6 single-transfer guard: a second send while one is active destroys
+    // the receiver's single recvFile slot and risks cross-transfer corruption.
+    if (sendActive) {
+        $("file-status").textContent = "One file at a time — wait for the current send to finish.";
+        return;
+    }
     if (file.size > MAX_FILE_SIZE) {
         $("file-status").textContent =
             `File too big: ${file.size} bytes (max ${MAX_FILE_SIZE} bytes / 1 GB)`;
         return;
     }
     $("file-status").textContent = "";
+    sendActive = true;
+    $("btn-file-pick").disabled = true;
+    sendTransferId = (sendTransferId + 1) & 0xff;
+    const tid = sendTransferId;
 
-    // Header: size(8 BE) || name_len(2 BE) || name_utf8
+    // Header: tid(1) || size(8 BE) || name_len(2 BE) || name_utf8
     const nameBytes = textEnc.encode(file.name);
-    const hdr = new Uint8Array(8 + 2 + nameBytes.length);
+    const hdr = new Uint8Array(1 + 8 + 2 + nameBytes.length);
+    hdr[0] = tid;
     const hv = new DataView(hdr.buffer);
-    hv.setBigUint64(0, BigInt(file.size), false);
-    hv.setUint16(8, nameBytes.length, false);
-    hdr.set(nameBytes, 10);
-    if (!sendPayload(T_FILE_HDR, hdr)) return;
+    hv.setBigUint64(1, BigInt(file.size), false);
+    hv.setUint16(9, nameBytes.length, false);
+    hdr.set(nameBytes, 11);
+    if (!sendPayload(T_FILE_HDR, hdr)) { endSendGuard(); return; }
 
     sendCancelled = false;
     sendCancelMsg = "";
@@ -1529,9 +1542,10 @@ async function sendFile(file) {
         const offset = i * CHUNK_SIZE;
         const slice = file.slice(offset, Math.min(file.size, offset + CHUNK_SIZE));
         const buf = new Uint8Array(await slice.arrayBuffer());
-        const payload = new Uint8Array(4 + buf.length);
-        new DataView(payload.buffer).setUint32(0, i, false);
-        payload.set(buf, 4);
+        const payload = new Uint8Array(1 + 4 + buf.length);
+        payload[0] = tid;
+        new DataView(payload.buffer).setUint32(1, i, false);
+        payload.set(buf, 5);
         if (!sendPayload(T_FILE_CHK, payload)) {
             // Mobile WS blips mid-send and reopens within the resume grace —
             // park and retry this chunk instead of aborting the whole transfer.
@@ -1545,6 +1559,7 @@ async function sendFile(file) {
             if (!sent) {
                 failFileRow(refs, `Send aborted at chunk ${i}`);
                 currentSendRefs = null;
+                endSendGuard();
                 return;
             }
         }
@@ -1578,10 +1593,13 @@ async function sendFile(file) {
     if (sendCancelled) {
         failFileRow(refs, sendCancelMsg || "Cancelled");
         drainAckWaiters(); // clear in-flight count; stray late ACKs floor at 0 in ackReceived
+        endSendGuard();
         return;
     }
     lastSentFile = file; // held so handleFileNack can re-read slices on retransmit request
-    sendPayload(T_FILE_END, new Uint8Array(0));
+    lastSentTid = tid;
+    sendPayload(T_FILE_END, new Uint8Array([tid]));
+    endSendGuard(); // re-enable on "Sent" — NACK rounds for this transfer stay valid via lastSentTid
     removeCancelBtn(refs);
     updateFileRow(refs, file.size, file.size, "Sent", 0);
     pendingDelivery = { refs, size: file.size }; // green "Delivered" only on T_FILE_DONE
@@ -1611,9 +1629,20 @@ function drainAckWaiters() {
 }
 
 // Receiver-side
-let recvFile = null; // { name, size, totalChunks, nackAttempts, parts: Uint8Array[], received: number, refs }
+let recvFile = null; // { tid, name, size, totalChunks, nackAttempts, parts: Uint8Array[], received: number, refs }
 // Sender-side: held after sendFile completes so handleFileNack can re-read slices
 let lastSentFile = null;
+let lastSentTid = -1; // transfer-ID of lastSentFile — NACKs for any other ID are stale and ignored
+// 16.9.6 single-transfer guard + per-transfer ID (1 byte, wraps mod 256).
+// The ID stamps HDR/CHK/END/NACK so stray in-flight frames from a finished or
+// superseded transfer can never land inside the next file's parts.
+let sendActive = false;
+let sendTransferId = 0;
+
+function endSendGuard() {
+    sendActive = false;
+    $("btn-file-pick").disabled = false;
+}
 // Sender-side: { refs, size } after T_FILE_END — handleFileDone flips it to "Delivered"
 let pendingDelivery = null;
 // 16.8.2 cancel state
@@ -1624,16 +1653,25 @@ let dropStrayChunks = false; // after an incoming cancel, late in-flight chunks 
 // 16.9.2: with striped paths, chunks (or even T_FILE_END) on a fast path can
 // arrive before the header that went on a slower one — stash and replay on HDR.
 let earlyChunks = [];
-let earlyEnd = false;
+let earlyEndTid = -1; // tid of an END that beat its header across paths (-1 = none)
 const EARLY_CHUNK_CAP = 256; // 32 MB of path skew — far beyond any real race
 
 function handleFileHdr(pt) {
-    if (pt.length < 10) { appendSystemMsg("(bad file header)"); return; }
+    if (pt.length < 11) { appendSystemMsg("(bad file header)"); return; }
+    const tid = pt[0];
     const v = new DataView(pt.buffer, pt.byteOffset, pt.byteLength);
-    const size = Number(v.getBigUint64(0, false));
-    const nameLen = v.getUint16(8, false);
-    if (pt.length !== 10 + nameLen) { appendSystemMsg("(bad file header)"); return; }
-    const name = textDec.decode(pt.slice(10, 10 + nameLen));
+    const size = Number(v.getBigUint64(1, false));
+    const nameLen = v.getUint16(9, false);
+    if (pt.length !== 11 + nameLen) { appendSystemMsg("(bad file header)"); return; }
+    const name = textDec.decode(pt.slice(11, 11 + nameLen));
+    // 16.9.6: single recvFile slot — a new header supersedes the old transfer
+    // EXPLICITLY (it used to be silently destroyed) and the tid checks below
+    // keep its still-in-flight chunks out of the new file's parts.
+    if (recvFile) {
+        const old = recvFile;
+        recvFile = null;
+        failFileRow(old.refs, `Incomplete · superseded · ${fmtBytes(old.received)} / ${fmtBytes(old.size)}`);
+    }
     dropStrayChunks = false; // new transfer — stray-chunk reporting is meaningful again
     const refs = appendFileRow(name, size, "in", () => {
         if (!recvFile || recvFile.refs !== refs) return; // stale button (already terminal)
@@ -1641,28 +1679,40 @@ function handleFileHdr(pt) {
         recvFile = null;
         dropStrayChunks = true; // chunks already in flight will keep landing — expected
         earlyChunks = [];
-        earlyEnd = false;
+        earlyEndTid = -1;
         sendPayload(T_FILE_CANCEL, new Uint8Array([0x01])); // tell sender to stop
         failFileRow(f.refs, "Cancelled");
     });
-    recvFile = { name, size, totalChunks: Math.max(1, Math.ceil(size / CHUNK_SIZE)), nackAttempts: 0, parts: [], received: 0, refs, speedSamples: [] };
-    // Replay anything that beat this header across a faster path (16.9.2)
+    recvFile = { tid, name, size, totalChunks: Math.max(1, Math.ceil(size / CHUNK_SIZE)), nackAttempts: 0, parts: [], received: 0, refs, speedSamples: [] };
+    // Replay anything that beat this header across a faster path (16.9.2);
+    // the tid check in handleFileChunk drops stashed frames from other transfers.
     const replay = earlyChunks;
     earlyChunks = [];
     for (const c of replay) handleFileChunk(c);
-    if (earlyEnd) { earlyEnd = false; handleFileEnd(); }
+    const endWasEarly = earlyEndTid === tid;
+    earlyEndTid = -1;
+    if (endWasEarly) handleFileEnd(new Uint8Array([tid]));
 }
 
 function handleFileChunk(pt) {
+    if (pt.length < 5) return;
     if (!recvFile) {
         if (!dropStrayChunks && earlyChunks.length < EARLY_CHUNK_CAP) {
             earlyChunks.push(pt); // header still in flight on another path (16.9.2)
         }
         return;
     }
-    if (pt.length < 4) return;
-    const idx = new DataView(pt.buffer, pt.byteOffset, pt.byteLength).getUint32(0, false);
-    const data = pt.slice(4);
+    if (pt[0] !== recvFile.tid) {
+        // Stray chunk from a finished/superseded transfer (16.9.6) — before the
+        // tid stamp these landed inside the current file's parts (silent
+        // corruption, caught only by the SHA-256 lines). Still ACK it so the
+        // sender's WS flow-control window can't leak a slot (same rationale as
+        // the duplicate branch below).
+        sendPayload(T_FILE_ACK, new Uint8Array(0));
+        return;
+    }
+    const idx = new DataView(pt.buffer, pt.byteOffset, pt.byteLength).getUint32(1, false);
+    const data = pt.slice(5);
     if (recvFile.parts[idx] !== undefined) {
         // Duplicate (a retransmit raced the late original). Still ACK it: the sender
         // counted this (re)sent chunk in its in-flight window, so without an ACK back
@@ -1683,11 +1733,13 @@ function handleFileChunk(pt) {
     updateFileRow(recvFile.refs, recvFile.received, recvFile.size, "Receiving", bps);
 }
 
-async function handleFileEnd() {
+async function handleFileEnd(pt) {
+    const tid = pt && pt.length >= 1 ? pt[0] : -1;
     if (!recvFile) {
-        if (!dropStrayChunks) earlyEnd = true; // END beat the header across paths (16.9.2)
+        if (!dropStrayChunks) earlyEndTid = tid; // END beat the header across paths (16.9.2)
         return;
     }
+    if (tid !== recvFile.tid) return; // stray END from a superseded transfer (16.9.6)
     const f = recvFile;
     // 16.9.5 unordered DC: a tiny END routinely overtakes large fragmented
     // chunks still in flight on its path (unordered = deliver-on-assembly),
@@ -1698,7 +1750,7 @@ async function handleFileEnd() {
     // grace forever) and re-arms after each NACK so every round gets one.
     if (f.received !== f.size && step === "chat" && !f.endGraceSpent) {
         f.endGraceSpent = true;
-        setTimeout(() => { if (recvFile === f) handleFileEnd(); }, 1000);
+        setTimeout(() => { if (recvFile === f) handleFileEnd(pt); }, 1000);
         return;
     }
     if (f.received !== f.size && f.nackAttempts < 3 && step === "chat") {
@@ -1710,9 +1762,10 @@ async function handleFileEnd() {
             f.nackAttempts++;
             f.endGraceSpent = false; // fresh grace for the retransmit round's END
             // Keep recvFile alive \u2014 retransmitted chunks + new T_FILE_END will arrive
-            const nackBuf = new Uint8Array(missing.length * 4);
+            const nackBuf = new Uint8Array(1 + missing.length * 4);
+            nackBuf[0] = f.tid;
             const dv = new DataView(nackBuf.buffer);
-            missing.forEach((chunkIdx, i) => dv.setUint32(i * 4, chunkIdx, false));
+            missing.forEach((chunkIdx, i) => dv.setUint32(1 + i * 4, chunkIdx, false));
             sendPayload(T_FILE_NACK, nackBuf);
             appendSystemMsg(`(requesting ${missing.length} missing chunk${missing.length === 1 ? "" : "s"}\u2026)`);
             return;
@@ -1759,7 +1812,7 @@ function handleFileCancel(pt) {
     if (pt.length !== 1) return;
     if (pt[0] === 0x00) {
         earlyChunks = [];
-        earlyEnd = false;
+        earlyEndTid = -1;
         if (!recvFile) { dropStrayChunks = true; return; }
         const f = recvFile;
         recvFile = null;
@@ -1771,6 +1824,7 @@ function handleFileCancel(pt) {
         sendCancelled = true;
         sendCancelMsg = "Cancelled by peer";
         lastSentFile = null; // a NACK round after this must not resurrect the transfer
+        lastSentTid = -1;
         if (currentSendRefs) failFileRow(currentSendRefs, "Cancelled by peer");
         else if (pendingDelivery) failFileRow(pendingDelivery.refs, "Cancelled by peer"); // rejected during a post-"Sent" NACK round
         pendingDelivery = null;
@@ -1783,21 +1837,24 @@ function handleFileCancel(pt) {
 // Reads only the requested slices from the original File object and re-sends them,
 // then fires T_FILE_END so the receiver can try assembly again.
 async function handleFileNack(pt) {
-    if (!lastSentFile || pt.length % 4 !== 0 || pt.length === 0) return;
-    const count = pt.length / 4;
+    if (!lastSentFile || pt.length < 5 || (pt.length - 1) % 4 !== 0) return;
+    const tid = pt[0];
+    if (tid !== lastSentTid) return; // NACK for a superseded transfer (16.9.6) — its file is gone, fail clean
+    const count = (pt.length - 1) / 4;
     const dv = new DataView(pt.buffer, pt.byteOffset, pt.byteLength);
     for (let j = 0; j < count; j++) {
         if (dcReconnecting) await waitDcSettled(); // 16.9.1: same park as the main loop
         // lastSentFile re-checked each pass: a T_FILE_CANCEL (0x01) arriving
         // mid-round nulls it and sets sendCancelled (16.8.2)
-        if (step !== "chat" || sendCancelled || !lastSentFile) return;
-        const idx = dv.getUint32(j * 4, false);
+        if (step !== "chat" || sendCancelled || !lastSentFile || tid !== lastSentTid) return;
+        const idx = dv.getUint32(1 + j * 4, false);
         const offset = idx * CHUNK_SIZE;
         const slice = lastSentFile.slice(offset, Math.min(lastSentFile.size, offset + CHUNK_SIZE));
         const buf = new Uint8Array(await slice.arrayBuffer());
-        const payload = new Uint8Array(4 + buf.length);
-        new DataView(payload.buffer).setUint32(0, idx, false);
-        payload.set(buf, 4);
+        const payload = new Uint8Array(1 + 4 + buf.length);
+        payload[0] = tid;
+        new DataView(payload.buffer).setUint32(1, idx, false);
+        payload.set(buf, 5);
         if (!sendPayload(T_FILE_CHK, payload)) return;
         if (useRTC && openDcPaths().length > 0) {
             await dcBackpressure(); // same stall-safe park as the main chunk loop
@@ -1809,6 +1866,6 @@ async function handleFileNack(pt) {
         }
     }
     if (sendCancelled) return;
-    sendPayload(T_FILE_END, new Uint8Array(0));
+    sendPayload(T_FILE_END, new Uint8Array([tid]));
 }
 

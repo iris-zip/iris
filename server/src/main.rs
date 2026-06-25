@@ -183,7 +183,7 @@ async fn main() {
     let sec_headers = tower::ServiceBuilder::new()
         .layer(SetResponseHeaderLayer::overriding(
             HeaderName::from_static("strict-transport-security"),
-            HeaderValue::from_static("max-age=31536000; includeSubDomains"),
+            HeaderValue::from_static("max-age=31536000; includeSubDomains; preload"),
         ))
         .layer(SetResponseHeaderLayer::overriding(
             HeaderName::from_static("content-security-policy"),

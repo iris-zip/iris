@@ -219,7 +219,36 @@ img, svg { display: block; max-width: 100%; }
 }
 
 /* ── 6. LANDING VIEW ─────────────────────────────────────────────── */
-#view-landing { gap: var(--sp-12); }
+#view-landing { gap: var(--sp-12); position: relative; }
+
+/* Footer nav — absolutely pinned to the bottom so it never shifts the
+   vertically-centred action stack. Landing view only.
+   ID-scoped so it overrides `.bm-view > *` width/max-width clamp. */
+#view-landing .bm-landing-foot {
+  position: absolute;
+  left: 0;
+  right: 0;
+  bottom: max(var(--sp-6), env(safe-area-inset-bottom));
+  width: auto;
+  max-width: none;
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: center;
+  gap: var(--sp-3) var(--sp-6);
+  padding: 0 var(--sp-6);
+  font-size: var(--t-body);
+}
+
+#view-landing .bm-landing-foot a {
+  color: var(--fg-muted);
+  text-decoration: none;
+  font-weight: 500;
+}
+
+#view-landing .bm-landing-foot a:hover {
+  color: var(--accent);
+  text-decoration: underline;
+}
 
 .bm-wordmark {
   display: flex;

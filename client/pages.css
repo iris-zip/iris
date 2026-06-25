@@ -1,0 +1,140 @@
+/* ═══════════════════════════════════════════════════════════════════
+   Iriszip — pages.css
+   Shared styles for the static content pages (about, security, privacy,
+   donate, organizations). No JavaScript. Calm palette: one background,
+   one text colour, one accent. Mirrors the app's tokens + dark theme.
+   ═══════════════════════════════════════════════════════════════════ */
+
+:root {
+  --pg-bg:      #F7F7F9;   /* page background */
+  --pg-fg:      #2C2C3C;   /* body text       */
+  --pg-muted:   #64647A;   /* secondary text  */
+  --pg-line:    #E0E0E8;   /* hairlines       */
+  --pg-accent:  #01688c;   /* links           */
+
+  --pg-font: system-ui, -apple-system, BlinkMacSystemFont,
+             "Segoe UI", "Segoe UI Variable", sans-serif;
+  --pg-max:  38rem;
+}
+
+@media (prefers-color-scheme: dark) {
+  :root {
+    --pg-bg:     #0C0C18;
+    --pg-fg:     #E8E8F0;
+    --pg-muted:  #8080A0;
+    --pg-line:   #222232;
+    --pg-accent: #4FB6D6;
+  }
+}
+
+* { box-sizing: border-box; }
+
+html { -webkit-text-size-adjust: 100%; }
+
+body {
+  margin: 0;
+  background: var(--pg-bg);
+  color: var(--pg-fg);
+  font-family: var(--pg-font);
+  font-size: 1.0625rem;
+  line-height: 1.7;
+  -webkit-font-smoothing: antialiased;
+  text-rendering: optimizeLegibility;
+}
+
+.pg-wrap {
+  max-width: var(--pg-max);
+  margin: 0 auto;
+  padding: 2.5rem 1.5rem 3.5rem;
+}
+
+/* ── Header / wordmark ──────────────────────────────────────────── */
+.pg-head {
+  display: flex;
+  align-items: center;
+  gap: 0.55rem;
+  margin-bottom: 2.75rem;
+  text-decoration: none;
+  color: var(--pg-fg);
+}
+
+.pg-head svg { width: 26px; height: 26px; color: var(--pg-accent); }
+
+.pg-head-text {
+  font-weight: 600;
+  letter-spacing: 0.04em;
+  font-size: 1.05rem;
+}
+
+/* ── Typography ─────────────────────────────────────────────────── */
+h1 {
+  font-size: 1.6rem;
+  font-weight: 650;
+  line-height: 1.3;
+  margin: 0 0 1.5rem;
+}
+
+h2 {
+  font-size: 1.15rem;
+  font-weight: 600;
+  margin: 2.25rem 0 0.5rem;
+}
+
+p { margin: 0 0 1.15rem; }
+
+.pg-lead { font-size: 1.15rem; }
+
+.pg-muted { color: var(--pg-muted); }
+
+a { color: var(--pg-accent); text-decoration: none; }
+a:hover { text-decoration: underline; }
+
+ul { padding-left: 1.2rem; margin: 0 0 1.15rem; }
+li { margin-bottom: 0.6rem; }
+
+strong { font-weight: 650; }
+
+hr {
+  border: 0;
+  border-top: 1px solid var(--pg-line);
+  margin: 2.5rem 0;
+}
+
+/* ── Donate buttons ─────────────────────────────────────────────── */
+.pg-btn-row {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.75rem;
+  margin: 1.5rem 0 0.5rem;
+}
+
+.pg-btn {
+  display: inline-block;
+  padding: 0.7rem 1.4rem;
+  border: 1px solid var(--pg-accent);
+  border-radius: 0.5rem;
+  font-weight: 600;
+  color: var(--pg-accent);
+  text-decoration: none;
+}
+
+.pg-btn--solid {
+  background: var(--pg-accent);
+  color: #fff;
+}
+
+.pg-btn:hover { text-decoration: none; opacity: 0.88; }
+
+/* ── Footer nav ─────────────────────────────────────────────────── */
+.pg-foot {
+  margin-top: 3.5rem;
+  padding-top: 1.5rem;
+  border-top: 1px solid var(--pg-line);
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.5rem 1.25rem;
+  font-size: 0.9rem;
+}
+
+.pg-foot a { color: var(--pg-muted); }
+.pg-foot a:hover { color: var(--pg-accent); }
