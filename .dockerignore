@@ -1,0 +1,22 @@
+# Build artifacts — rebuilt fresh inside the image for reproducibility.
+target/
+**/target/
+client/pkg/
+
+# Never ship deploy-only secrets or dev backups into a build context.
+client/turn.json
+backups/
+.env
+.env.local
+
+# Node / Playwright tooling — not needed to build or run the server.
+node_modules/
+**/node_modules/
+tests/browser/test-results/
+tests/browser/playwright-report/
+/test-results/
+
+# Misc local-only clutter.
+.claude/
+*.zip
+*.tar.gz

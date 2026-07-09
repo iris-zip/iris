@@ -125,6 +125,29 @@ hr {
 
 .pg-btn:hover { text-decoration: none; opacity: 0.88; }
 
+.pg-note { margin-top: 1.25rem; }
+
+/* ── Crypto address blocks ──────────────────────────────────────── */
+.pg-addr {
+  margin: 0 0 1.25rem;
+  padding: 0.9rem 1.1rem;
+  border: 1px solid var(--pg-line);
+  border-radius: 0.5rem;
+}
+
+.pg-addr dt {
+  font-weight: 650;
+  margin-bottom: 0.35rem;
+}
+
+.pg-addr dd {
+  margin: 0;
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  font-size: 0.92rem;
+  word-break: break-all;
+  color: var(--pg-muted);
+}
+
 /* ── Footer nav ─────────────────────────────────────────────────── */
 .pg-foot {
   margin-top: 3.5rem;

@@ -36,24 +36,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "c08606f8c3cbf4ce6ec8e28fb0014a2c086708fe954eaa885384a6165172e7e8"
 
 [[package]]
-name = "beem-crypto"
-version = "0.1.0"
-dependencies = [
- "chacha20poly1305",
- "getrandom 0.2.17",
- "getrandom 0.4.2",
- "hkdf 0.12.4",
- "ml-kem",
- "rand_core 0.6.4",
- "sha2 0.10.9",
- "spake2",
- "wasm-bindgen",
- "wasm-bindgen-test",
- "x25519-dalek",
- "zeroize",
-]
-
-[[package]]
 name = "bitflags"
 version = "2.11.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -448,6 +430,24 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "879f10e63c20629ecabbb64a8010319738c66a5cd0c29b02d63d272b03751d01"
 dependencies = [
  "generic-array",
+]
+
+[[package]]
+name = "iris-crypto"
+version = "0.1.0"
+dependencies = [
+ "chacha20poly1305",
+ "getrandom 0.2.17",
+ "getrandom 0.4.2",
+ "hkdf 0.12.4",
+ "ml-kem",
+ "rand_core 0.6.4",
+ "sha2 0.10.9",
+ "spake2",
+ "wasm-bindgen",
+ "wasm-bindgen-test",
+ "x25519-dalek",
+ "zeroize",
 ]
 
 [[package]]

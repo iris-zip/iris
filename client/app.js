@@ -1,7 +1,7 @@
 // 15.4 SRI — placeholders rewritten by scripts/build-sri.sh on release build.
 // Until rewritten, runtime check short-circuits with a dev-mode warning.
-const CRYPTO_JS_SRI   = "sha384-VlqKsEfGZXBbbOzYa95XrbRww3j56CFXwTVcOi6QgO6LbUOz+N4QqjR2/j55J2Uh";
-const CRYPTO_WASM_SRI = "sha384-o85xZSK3Djr9z0KikYeON5OoXpxxwCNSNQZMMbYZHafJRxbxwULiciZ3qWNpLo64";
+const CRYPTO_JS_SRI   = "sha384-osLYyVEt1lMfPw0Du9COhIM5xpR5Cy6ghrclWm++dvom3G5NKDtA5ClZ5GOXIF/x";
+const CRYPTO_WASM_SRI = "sha384-Mc4lw7tppkvLqGl9bZvDi/n3F4AHU0dd8FVcXReIgtfG2X09BXEgxOmfMBHGkn3O";
 const SRI_PLACEHOLDER_PREFIX = "__SRI_";
 
 async function sha384Base64(buf) {
@@ -19,12 +19,12 @@ function sriVersion(sri) {
 }
 
 async function verifyAndLoadCrypto() {
-    const jsResp = await fetch(`./pkg/beem_crypto.js?v=${sriVersion(CRYPTO_JS_SRI)}`);
+    const jsResp = await fetch(`./pkg/iris_crypto.js?v=${sriVersion(CRYPTO_JS_SRI)}`);
     if (!jsResp.ok) throw new Error(`crypto.js fetch ${jsResp.status}`);
     const jsBytes = await jsResp.arrayBuffer();
     const jsHash  = `sha384-${await sha384Base64(jsBytes)}`;
 
-    const wasmResp = await fetch(`./pkg/beem_crypto_bg.wasm?v=${sriVersion(CRYPTO_WASM_SRI)}`);
+    const wasmResp = await fetch(`./pkg/iris_crypto_bg.wasm?v=${sriVersion(CRYPTO_WASM_SRI)}`);
     if (!wasmResp.ok) throw new Error(`wasm fetch ${wasmResp.status}`);
     const wasmBytes = await wasmResp.arrayBuffer();
     const wasmHash  = `sha384-${await sha384Base64(wasmBytes)}`;
@@ -32,9 +32,9 @@ async function verifyAndLoadCrypto() {
     const devMode = CRYPTO_JS_SRI.startsWith(SRI_PLACEHOLDER_PREFIX)
                  || CRYPTO_WASM_SRI.startsWith(SRI_PLACEHOLDER_PREFIX);
     if (devMode) {
-        console.warn("[beem] SRI dev mode — hashes not yet injected. Run scripts/build-sri.sh before release.");
-        console.warn(`[beem] observed crypto.js  ${jsHash}`);
-        console.warn(`[beem] observed wasm       ${wasmHash}`);
+        console.warn("[iris] SRI dev mode — hashes not yet injected. Run scripts/build-sri.sh before release.");
+        console.warn(`[iris] observed crypto.js  ${jsHash}`);
+        console.warn(`[iris] observed wasm       ${wasmHash}`);
     } else {
         if (jsHash !== CRYPTO_JS_SRI) {
             throw new Error(`SRI fail: crypto.js expected ${CRYPTO_JS_SRI} got ${jsHash}`);

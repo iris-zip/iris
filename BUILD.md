@@ -1,4 +1,4 @@
-# Building Beem
+# Building Iris
 
 ## Requirements
 
@@ -16,7 +16,7 @@ wasm-pack build --target web --mode no-install
 cd ..
 ```
 
-Output: `client/pkg/` — `beem_crypto.js` + `beem_crypto_bg.wasm`
+Output: `client/pkg/` — `iris_crypto.js` + `iris_crypto_bg.wasm`
 
 **2. Inject SRI hashes**
 
@@ -24,7 +24,7 @@ Output: `client/pkg/` — `beem_crypto.js` + `beem_crypto_bg.wasm`
 bash scripts/build-sri.sh
 ```
 
-This reads `client/app.js`, `client/pkg/beem_crypto.js`, and `client/pkg/beem_crypto_bg.wasm`, computes SHA-384 for each, writes hashes into `client/index.html` and `client/app.js`, and regenerates `HASHES.md`.
+This reads `client/app.js`, `client/pkg/iris_crypto.js`, and `client/pkg/iris_crypto_bg.wasm`, computes SHA-384 for each, writes hashes into `client/index.html` and `client/app.js`, and regenerates `HASHES.md`.
 
 **3. Build the server**
 
@@ -34,12 +34,12 @@ cargo build --locked --release
 cd ..
 ```
 
-Output: `server/target/release/beem-server`
+Output: `server/target/release/iris-server`
 
 **4. Run**
 
 ```sh
-./server/target/release/beem-server
+./server/target/release/iris-server
 ```
 
 Server listens on `127.0.0.1:8080` by default.
@@ -49,7 +49,7 @@ Server listens on `127.0.0.1:8080` by default.
 Two clean checkouts on the same OS and Rust version should produce byte-identical WASM. To verify:
 
 ```sh
-sha384sum client/pkg/beem_crypto_bg.wasm
+sha384sum client/pkg/iris_crypto_bg.wasm
 ```
 
 Compare against the `wasm` row in `HASHES.md`. They must match exactly.

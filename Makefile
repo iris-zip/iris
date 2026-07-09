@@ -1,4 +1,4 @@
-# Beem — build orchestration (16.5.5)
+# Iris — build orchestration (16.5.5)
 # `make deploy` encodes the release order so it can never be run backwards:
 # SRI hashes are computed from the freshly built wasm, so wasm MUST come first.
 

@@ -225,7 +225,7 @@ async fn main() {
         .await
         .expect("bind");
     let actual_port = listener.local_addr().expect("local_addr").port();
-    println!("Beem listening on http://{}:{}", host, actual_port);
+    println!("Iris listening on http://{}:{}", host, actual_port);
     axum::serve(
         listener,
         app.into_make_service_with_connect_info::<SocketAddr>(),

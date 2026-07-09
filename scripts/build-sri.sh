@@ -4,7 +4,7 @@
 #              with what the browser actually loads.
 #
 # Order matters:
-#   1. Hash pkg/beem_crypto.js and pkg/beem_crypto_bg.wasm.
+#   1. Hash pkg/iris_crypto.js and pkg/iris_crypto_bg.wasm.
 #   2. Rewrite the two constants in client/app.js with those hashes.
 #   3. Hash the now-updated app.js.
 #   4. Rewrite the <script> tag in client/index.html with that hash.
@@ -19,8 +19,8 @@ cd "$(dirname "$0")/.."
 CLIENT=client
 APP_JS="$CLIENT/app.js"
 INDEX="$CLIENT/index.html"
-CRYPTO_JS="$CLIENT/pkg/beem_crypto.js"
-CRYPTO_WASM="$CLIENT/pkg/beem_crypto_bg.wasm"
+CRYPTO_JS="$CLIENT/pkg/iris_crypto.js"
+CRYPTO_WASM="$CLIENT/pkg/iris_crypto_bg.wasm"
 
 for f in "$APP_JS" "$INDEX" "$CRYPTO_JS" "$CRYPTO_WASM"; do
     [[ -f "$f" ]] || { echo "missing: $f" >&2; exit 1; }
@@ -75,7 +75,7 @@ GIT_FULL=$(git rev-parse HEAD 2>/dev/null || echo "(no git)")
 STAMP=$(date -u +"%Y-%m-%dT%H:%M:%SZ")
 
 cat > "$HASHES_MD" <<EOF
-# Beem — Published Build Hashes
+# Iris — Published Build Hashes
 
 Every file the browser runs ships with a SHA-384 Subresource Integrity tag
 and is also listed here. Cross-check these against what your browser
@@ -91,15 +91,15 @@ exact code in this git commit.
 | File | sha384 (hex) | sha384 (SRI / base64) |
 |---|---|---|
 | \`client/app.js\` | \`$APP_JS_HEX\` | \`$APP_JS_SRI\` |
-| \`client/pkg/beem_crypto.js\` | \`$CRYPTO_JS_HEX\` | \`$CRYPTO_JS_SRI\` |
-| \`client/pkg/beem_crypto_bg.wasm\` | \`$CRYPTO_WASM_HEX\` | \`$CRYPTO_WASM_SRI\` |
+| \`client/pkg/iris_crypto.js\` | \`$CRYPTO_JS_HEX\` | \`$CRYPTO_JS_SRI\` |
+| \`client/pkg/iris_crypto_bg.wasm\` | \`$CRYPTO_WASM_HEX\` | \`$CRYPTO_WASM_SRI\` |
 
 ## How to verify manually
 
 From the repo root, after a clean checkout:
 
 \`\`\`
-sha384sum client/app.js client/pkg/beem_crypto.js client/pkg/beem_crypto_bg.wasm
+sha384sum client/app.js client/pkg/iris_crypto.js client/pkg/iris_crypto_bg.wasm
 \`\`\`
 
 The hex values must match the table above. If they don't, either the
