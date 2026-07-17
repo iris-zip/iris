@@ -181,7 +181,7 @@ pub fn hkdf_combine(
 
 #[wasm_bindgen]
 pub fn start_pake(code: &str, role: &str) -> Result<PakeState, JsError> {
-    // the protocol layer enforces a 5-digit code; this guard makes the
+    // the protocol layer enforces a 6-digit code; this guard makes the
     // module self-defending if reused elsewhere — an empty password must not
     // silently produce a PAKE protected by nothing. Upper bound is sanity only.
     if code.is_empty() || code.len() > 64 {
