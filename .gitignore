@@ -29,3 +29,8 @@ tests/browser/test-results/
 # Local source backups (safety copies, not part of history)
 backups/
 client/turn.json
+
+# never commit: confidential audit report + local scratch
+*.pdf
+iriszip-deposit-*.zip
+.claude/

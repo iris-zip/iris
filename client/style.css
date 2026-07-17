@@ -19,13 +19,13 @@
   --n-800: #18182A;
   --n-900: #0C0C18;
 
-  /* Accent — teal-cyan */
-  --a-100: #DCF2F8;
-  --a-200: #9DD9EE;
-  --a-300: #3AABCC;
-  --a-400: #01688c;
-  --a-500: #015270;
-  --a-600: #013D54;
+  /* Accent — iris violet */
+  --a-100: #EDE9FE;
+  --a-200: #C4B5FD;
+  --a-300: #8B5CF6;
+  --a-400: #6D28D9;
+  --a-500: #5B21B6;
+  --a-600: #4C1D95;
 
   /* Semantic — light (default) */
   --bg-default:     var(--n-50);
@@ -50,7 +50,7 @@
   --status-err-bg:  #FEE2E2;
 
   /* Pre-computed focus shadow — no color-mix() */
-  --sh-focus-color: rgba(1, 104, 140, 0.32);
+  --sh-focus-color: rgba(109, 40, 217, 0.32);
 
   /* Font stacks */
   --font-sans: system-ui, -apple-system, BlinkMacSystemFont,
@@ -117,17 +117,17 @@
     --fg-default:     #F0F0F6;
     --fg-muted:       #8080A0;
     --fg-subtle:      #52526A;
-    --accent:         #01688c;
-    --accent-bg:      #012830;
+    --accent:         #7C3AED;
+    --accent-bg:      #1E1033;
     --accent-fg:      #FFFFFF;
-    --accent-press:   #015270;
+    --accent-press:   #6D28D9;
     --status-ok:      #4ADE80;
     --status-ok-bg:   #052814;
     --status-warn:    #FBB650;
     --status-warn-bg: #2A1A02;
     --status-err:     #F87171;
     --status-err-bg:  #2A0808;
-    --sh-focus-color: rgba(58, 171, 204, 0.32);
+    --sh-focus-color: rgba(139, 92, 246, 0.32);
   }
 }
 
@@ -220,6 +220,20 @@ img, svg { display: block; max-width: 100%; }
 
 /* ── 6. LANDING VIEW ─────────────────────────────────────────────── */
 #view-landing { gap: var(--sp-12); position: relative; }
+
+/* Landing glow (dark only): soft violet halo centred behind the action
+   stack. Painted as a background — not a pseudo-element — so it can't
+   create overflow, scrollbars, or layout shift on any screen size.
+   Light theme deliberately excluded: the glow reads as ambience on
+   true black and as a stain on white. */
+@media (prefers-color-scheme: dark) {
+  #view-landing {
+    background: radial-gradient(circle 20rem at 50% 52%,
+                rgba(124, 58, 237, 0.22) 0%,
+                rgba(124, 58, 237, 0.08) 45%,
+                transparent 70%);
+  }
+}
 
 /* Footer nav — absolutely pinned to the bottom so it never shifts the
    vertically-centred action stack. Landing view only.

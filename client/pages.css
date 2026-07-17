@@ -10,7 +10,7 @@
   --pg-fg:      #2C2C3C;   /* body text       */
   --pg-muted:   #64647A;   /* secondary text  */
   --pg-line:    #E0E0E8;   /* hairlines       */
-  --pg-accent:  #01688c;   /* links           */
+  --pg-accent:  #6D28D9;   /* links           */
 
   --pg-font: system-ui, -apple-system, BlinkMacSystemFont,
              "Segoe UI", "Segoe UI Variable", sans-serif;
@@ -23,7 +23,7 @@
     --pg-fg:     #E8E8F0;
     --pg-muted:  #8080A0;
     --pg-line:   #222232;
-    --pg-accent: #4FB6D6;
+    --pg-accent: #A78BFA;
   }
 }
 

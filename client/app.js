@@ -422,7 +422,7 @@ $("code-input").addEventListener("keydown", (e) => {
     if (e.key === "Enter") joinAsReceiver();
 });
 $("code-input").addEventListener("input", () => {
-    if ($("code-input").value.length === 5) joinAsReceiver();
+    if ($("code-input").value.length === 6) joinAsReceiver();
 });
 
 $("btn-chat-send").addEventListener("click", sendChat);
@@ -433,7 +433,7 @@ $("chat-input").addEventListener("keydown", (e) => {
     }
 });
 
-// Copy 5-digit pairing code to clipboard. localhost + https are both
+// Copy 6-digit pairing code to clipboard. localhost + https are both
 // secure contexts, so navigator.clipboard is available; falls back silently.
 const copyBtn = document.querySelector(".bm-copy-btn");
 if (copyBtn) {
@@ -522,8 +522,8 @@ function joinAsReceiver() {
     if (ws && (ws.readyState === WebSocket.CONNECTING ||
                (ws.readyState === WebSocket.OPEN && step !== null && step !== "chat"))) return;
     const code = $("code-input").value.trim();
-    if (!/^\d{5}$/.test(code)) {
-        $("receiver-error").textContent = "Please enter exactly 5 digits.";
+    if (!/^\d{6}$/.test(code)) {
+        $("receiver-error").textContent = "Please enter exactly 6 digits.";
         return;
     }
     $("receiver-error").textContent = "";

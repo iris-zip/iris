@@ -10,7 +10,7 @@ use axum::{
     Json, Router,
 };
 use dashmap::{mapref::entry::Entry, DashMap};
-use http::{header::{HeaderName, HeaderValue}, HeaderMap};
+use http::{header::{HeaderName, HeaderValue, CONTENT_TYPE}, HeaderMap};
 use rand::Rng;
 use serde::{Deserialize, Serialize};
 use std::{
@@ -138,6 +138,7 @@ struct AppState {
     rate_limits: RateLimits,
     concurrent: Concurrent,
     session_secs: u64,
+    audit: bool,
 }
 
 static NEXT_ID: AtomicU64 = AtomicU64::new(0);
@@ -153,7 +154,29 @@ struct NewCodeResponse {
 }
 
 fn is_valid_code(s: &str) -> bool {
-    s.len() == 5 && s.bytes().all(|b| b.is_ascii_digit())
+    s.len() == 6 && s.bytes().all(|b| b.is_ascii_digit())
+}
+
+// 17.3 branding: accent color is spliced verbatim into a CSS custom property,
+// so it's restricted to characters that can't close the declaration/rule and
+// start injecting new ones (no `;`, `{`, `}`).
+fn is_safe_css_color(s: &str) -> bool {
+    !s.is_empty()
+        && s.len() <= 64
+        && s.bytes().all(|b| {
+            b.is_ascii_alphanumeric() || matches!(b, b'#' | b'(' | b')' | b',' | b'.' | b'%' | b' ' | b'-')
+        })
+}
+
+// 17.3 branding: wordmark text is spliced into a JS string literal in
+// branding.js — escape backslash/quote so it can't break out of the literal.
+fn escape_js_string(s: &str) -> String {
+    s.chars().take(64).flat_map(|c| match c {
+        '\\' => vec!['\\', '\\'],
+        '"' => vec!['\\', '"'],
+        '\n' | '\r' => vec![' '],
+        c => vec![c],
+    }).collect()
 }
 
 #[tokio::main]
@@ -164,11 +187,28 @@ async fn main() {
     let session_secs: u64 = std::env::var("BEEM_SESSION_SECS").ok()
         .and_then(|s| s.parse().ok()).unwrap_or(MAX_SESSION_SECS);
 
+    // 17.4 Optional stderr audit log for compliance. Off by default; no content, no
+    // codes, no raw IPs — fingerprint only (see ip_fingerprint, reused from 15.3).
+    let audit = std::env::var("BEEM_AUDIT").ok().as_deref() == Some("1");
+
+    // 17.3 optional self-host branding: unset by default, no visible change.
+    let branding_css = std::env::var("BEEM_ACCENT_COLOR").ok()
+        .filter(|c| is_safe_css_color(c))
+        .map(|c| format!(":root {{ --accent: {c} !important; --accent-press: {c} !important; }}\n"))
+        .unwrap_or_default();
+    let branding_js = std::env::var("BEEM_WORDMARK_TEXT").ok()
+        .filter(|t| !t.is_empty())
+        .map(|t| format!(
+            "document.querySelectorAll('.bm-wordmark-text').forEach(function(el){{ el.textContent = \"{}\"; }});\n",
+            escape_js_string(&t)
+        ))
+        .unwrap_or_default();
+
     let rooms: Rooms = Arc::new(DashMap::new());
     let rate_limits: RateLimits = Arc::new(DashMap::new());
     let concurrent: Concurrent = Arc::new(DashMap::new());
     spawn_sweeper(rooms.clone(), rate_limits.clone(), concurrent.clone());
-    let state = AppState { rooms, rate_limits, concurrent, session_secs };
+    let state = AppState { rooms, rate_limits, concurrent, session_secs, audit };
 
     // 12.1 Rate limit: /new ~ 10/min per IP (burst 10, replenish 1 per 6s).
     let governor_conf = Arc::new(
@@ -217,6 +257,14 @@ async fn main() {
             post(new_code).layer(GovernorLayer { config: governor_conf }),
         )
         .route("/ws", get(ws_handler))
+        .route("/branding.css", get(move || {
+            let body = branding_css.clone();
+            async move { ([(CONTENT_TYPE, "text/css; charset=utf-8")], body) }
+        }))
+        .route("/branding.js", get(move || {
+            let body = branding_js.clone();
+            async move { ([(CONTENT_TYPE, "text/javascript; charset=utf-8")], body) }
+        }))
         .with_state(state)
         .fallback_service(ServeDir::new("../client"))
         .layer(sec_headers);
@@ -274,7 +322,7 @@ fn spawn_sweeper(rooms: Rooms, rate_limits: RateLimits, concurrent: Concurrent) 
 }
 
 fn generate_code<R: Rng>(rng: &mut R) -> String {
-    format!("{:05}", rng.gen_range(0..100000))
+    format!("{:06}", rng.gen_range(0..1_000_000))
 }
 
 async fn new_code(State(state): State<AppState>) -> Result<Json<NewCodeResponse>, StatusCode> {
@@ -505,7 +553,7 @@ async fn ws_handler(
     ws.max_message_size(MAX_WS_FRAME)
         .max_frame_size(MAX_WS_FRAME)
         .on_upgrade(move |socket| async move {
-            pair(socket, params.code, state.rooms, state.session_secs).await;
+            pair(socket, params.code, state.rooms, state.session_secs, ip, state.audit).await;
             // Decrement active connection count for this IP.
             if let Some(mut c) = concurrent.get_mut(&ip) {
                 *c = c.saturating_sub(1);
@@ -513,7 +561,17 @@ async fn ws_handler(
         })
 }
 
-async fn pair(mut socket: WebSocket, code: String, rooms: Rooms, session_secs: u64) {
+// 17.4 msg_payload_len: bytes charged toward the audit log's in/out counters.
+// Control frames (Ping/Pong/Close) carry no application payload — 0.
+fn msg_payload_len(msg: &Message) -> usize {
+    match msg {
+        Message::Text(t) => t.len(),
+        Message::Binary(b) => b.len(),
+        _ => 0,
+    }
+}
+
+async fn pair(mut socket: WebSocket, code: String, rooms: Rooms, session_secs: u64, ip: IpAddr, audit: bool) {
     // 15.11 Per-code brute-force guard: increment attempts on lookup. If this
     // attempt would put us at or past MAX_CODE_ATTEMPTS, burn the room entirely.
     // Also capture attempt count before increment — only the first 2 connections
@@ -555,6 +613,11 @@ async fn pair(mut socket: WebSocket, code: String, rooms: Rooms, session_secs: u
     // socket and mark so the post-loop step doesn't rebroadcast another Close back at them.
     let mut peer_closed_us = false;
 
+    // 17.4 Audit counters (bytes only — no content, no IPs, no codes).
+    let started = Instant::now();
+    let mut bytes_in: u64 = 0;
+    let mut bytes_out: u64 = 0;
+
     loop {
         tokio::select! {
             _ = tokio::time::sleep_until(deadline) => {
@@ -564,7 +627,10 @@ async fn pair(mut socket: WebSocket, code: String, rooms: Rooms, session_secs: u
             incoming = socket.recv() => {
                 match incoming {
                     Some(Ok(Message::Close(_))) | None => break,
-                    Some(Ok(msg)) => { let _ = tx.send((my_id, msg)); }
+                    Some(Ok(msg)) => {
+                        bytes_in += msg_payload_len(&msg) as u64;
+                        let _ = tx.send((my_id, msg));
+                    }
                     Some(Err(_)) => break,
                 }
             }
@@ -579,6 +645,7 @@ async fn pair(mut socket: WebSocket, code: String, rooms: Rooms, session_secs: u
                                 peer_closed_us = true;
                                 break;
                             }
+                            bytes_out += msg_payload_len(&msg) as u64;
                             if socket.send(msg).await.is_err() { break; }
                         }
                     }
@@ -590,6 +657,15 @@ async fn pair(mut socket: WebSocket, code: String, rooms: Rooms, session_secs: u
                 }
             }
         }
+    }
+
+    // 17.4 One stderr line per session-end when BEEM_AUDIT=1. No content, no
+    // codes, no raw IPs — fingerprint only (reuses 15.3's ip_fingerprint).
+    if audit {
+        eprintln!(
+            "[audit] session={:x} bytes_in={} bytes_out={} duration_s={}",
+            ip_fingerprint(ip), bytes_in, bytes_out, started.elapsed().as_secs()
+        );
     }
 
     // 15.9 On our exit (tab close, error, deadline), tell the other peer once.
@@ -626,17 +702,17 @@ mod tests {
     // TEST-S-001 — Code format validation
     #[test]
     fn test_is_valid_code() {
-        assert!(is_valid_code("00000"));
-        assert!(is_valid_code("12345"));
-        assert!(is_valid_code("99999"));
-        assert!(!is_valid_code("1234"));
-        assert!(!is_valid_code("123456"));
-        assert!(!is_valid_code("abcde"));
+        assert!(is_valid_code("000000"));
+        assert!(is_valid_code("123456"));
+        assert!(is_valid_code("999999"));
+        assert!(!is_valid_code("12345"));
+        assert!(!is_valid_code("1234567"));
+        assert!(!is_valid_code("abcdef"));
         assert!(!is_valid_code(""));
-        assert!(!is_valid_code("1234a"));
-        assert!(!is_valid_code("-1234"));
-        assert!(!is_valid_code(" 1234"));
-        assert!(!is_valid_code("１２３４５")); // full-width digits (each is 3 UTF-8 bytes, len != 5)
+        assert!(!is_valid_code("12345a"));
+        assert!(!is_valid_code("-12345"));
+        assert!(!is_valid_code(" 12345"));
+        assert!(!is_valid_code("１２３４５６")); // full-width digits (each is 3 UTF-8 bytes, len != 6)
     }
 
     // TEST-S-002 — Code generator format + bias check
@@ -854,5 +930,15 @@ mod tests {
 
         assert!(concurrent.get(&dead_ip).is_none(), "zeroed counter must be GC'd");
         assert_eq!(*concurrent.get(&active_ip).unwrap(), 2, "active counter must survive");
+    }
+
+    // TEST-S-013 — 17.4 audit byte-counting: payload length by message variant
+    #[test]
+    fn test_msg_payload_len() {
+        assert_eq!(msg_payload_len(&Message::Text("hello".to_string())), 5);
+        assert_eq!(msg_payload_len(&Message::Binary(vec![0u8; 7])), 7);
+        assert_eq!(msg_payload_len(&Message::Ping(vec![1, 2, 3])), 0);
+        assert_eq!(msg_payload_len(&Message::Pong(vec![1, 2, 3])), 0);
+        assert_eq!(msg_payload_len(&Message::Close(None)), 0);
     }
 }

@@ -9,6 +9,7 @@
     <meta property="og:title" content="Iriszip">
     <meta property="og:description" content="Encrypted file transfer. No account. Nothing stored.">
     <meta property="og:type" content="website">
+    <link rel="stylesheet" href="branding.css">
     <link rel="stylesheet" href="style.css">
 </head>
 <body>
@@ -95,17 +96,17 @@
 
     <main id="view-receiver" class="bm-view" hidden>
 
-        <label class="bm-receiver-label" for="code-input">Enter the 5-digit code</label>
+        <label class="bm-receiver-label" for="code-input">Enter the 6-digit code</label>
 
         <input id="code-input"
                type="text"
                inputmode="numeric"
-               pattern="\d{5}"
-               maxlength="5"
+               pattern="\d{6}"
+               maxlength="6"
                autocomplete="off"
                autocorrect="off"
                spellcheck="false"
-               placeholder="_ _ _ _ _"
+               placeholder="_ _ _ _ _ _"
                aria-describedby="receiver-error">
 
         <p id="receiver-error" class="bm-error-line" aria-live="polite"></p>
@@ -191,6 +192,7 @@
         <button class="bm-fatal-retry">Start a new session</button>
     </div>
 
-    <script type="module" src="app.js?v=c1DmKQp5ror5" integrity="sha384-+c1D+mKQp5ror5b1qGl7BlsFwd3YGgMtRjMWBz9dl0EUD1qTOSBn9aOObu5BioYq"></script>
+    <script src="branding.js" defer></script>
+    <script type="module" src="app.js?v=9fpcKAd974Gf" integrity="sha384-9fpcKAd97+4GfvESXqucmSnjFVLXN8ckO1wV6WLqhUwADPp2Fb570fN2zWMWvOll"></script>
 </body>
 </html>
