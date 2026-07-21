@@ -1,7 +1,7 @@
 // 15.4 SRI — placeholders rewritten by scripts/build-sri.sh on release build.
 // Until rewritten, runtime check short-circuits with a dev-mode warning.
-const CRYPTO_JS_SRI   = "sha384-ZjzAD+YebCuGOe7gHZquNblaaBfiILnBvgvSR/+J5tCP3ZdV1h8dwYbXnG1m10Ga";
-const CRYPTO_WASM_SRI = "sha384-BV/Jl8gs64GtFz2v8xd/itc+0yPNvoJrWp5QIO0lhnK4WpVqW+zXKXUl7L/4fhxV";
+const CRYPTO_JS_SRI   = "sha384-osLYyVEt1lMfPw0Du9COhIM5xpR5Cy6ghrclWm++dvom3G5NKDtA5ClZ5GOXIF/x";
+const CRYPTO_WASM_SRI = "sha384-Mc4lw7tppkvLqGl9bZvDi/n3F4AHU0dd8FVcXReIgtfG2X09BXEgxOmfMBHGkn3O";
 const SRI_PLACEHOLDER_PREFIX = "__SRI_";
 
 async function sha384Base64(buf) {
@@ -86,7 +86,6 @@ const {
     x25519_keypair, x25519_shared,
     mlkem_keygen, mlkem_encaps, mlkem_decaps,
     hkdf_combine,
-    Sha256Stream,
 } = cryptoMod;
 
 const views = {
@@ -190,6 +189,12 @@ function setWaitMsg(text, tone) {
     if (dot) dot.classList.toggle("bm-status-dot--waiting", tone === "warn");
     const label = chip.querySelector(".bm-wait-label");
     if (label) label.textContent = text;
+}
+
+async function fileChecksum(bytes) {
+    const digest = await crypto.subtle.digest("SHA-256", bytes);
+    return Array.from(new Uint8Array(digest))
+        .map(b => b.toString(16).padStart(2, "0")).join("");
 }
 
 function bytesEq(a, b) {
@@ -421,6 +426,20 @@ $("code-input").addEventListener("input", () => {
     if ($("code-input").value.length === 6) joinAsReceiver();
 });
 
+// 23.6: deep-link join from a scanned QR (#<code>). Runs after crypto init above,
+// so joinAsReceiver() below actually works. Strip the hash immediately via
+// replaceState — fragments never reach the server, but the code shouldn't
+// linger in the address bar or browser history either.
+const hashMatch = location.hash.match(/^#(\d{6})$/);
+if (hashMatch) {
+    history.replaceState(null, "", location.pathname + location.search);
+    $("receiver-error").textContent = "";
+    clearRateBanners();
+    show("receiver");
+    $("code-input").value = hashMatch[1];
+    $("code-input").dispatchEvent(new Event("input")); // reuses the existing auto-submit-at-6-digits path
+}
+
 $("btn-chat-send").addEventListener("click", sendChat);
 $("chat-input").addEventListener("keydown", (e) => {
     if (e.key === "Enter" && !e.shiftKey) {
@@ -619,14 +638,6 @@ function openWs(code, resume = false) {
             if (m) {
                 preCloseCode = parseInt(m[1], 10);
                 preCloseReason = m[2];
-                return;
-            }
-            // 23.7 Peer-presence hints from the relay — chip text only, never state.
-            const g = e.data.match(/^BEEM-GRACE:(\d+)$/);
-            if (g && step === "chat") {
-                setChatChip("warn", `Peer connection lost — waiting up to ${g[1]} s…`);
-            } else if (e.data === "BEEM-BACK" && step === "chat") {
-                setChatChip("ok", "Connected");
             }
             return;
         }
@@ -1630,9 +1641,6 @@ async function sendFile(file) {
     let sentBytes = 0;
     // Sliding 1-second window: array of [timestamp, bytes] samples
     let speedSamples = [];
-    // 21.2 — streaming checksum: each chunk hashed once as it's read, no
-    // second full-file buffer/read needed at the end.
-    const hasher = new Sha256Stream();
 
     for (let i = 0; i < totalChunks; i++) {
         if (sendCancelled) break;
@@ -1645,7 +1653,6 @@ async function sendFile(file) {
         const offset = i * CHUNK_SIZE;
         const slice = file.slice(offset, Math.min(file.size, offset + CHUNK_SIZE));
         const buf = new Uint8Array(await slice.arrayBuffer());
-        hasher.update(buf); // 21.2 — hash in-flight, index order, once per chunk
         const payload = new Uint8Array(1 + 4 + buf.length);
         payload[0] = tid;
         new DataView(payload.buffer).setUint32(1, i, false);
@@ -1708,8 +1715,7 @@ async function sendFile(file) {
     updateFileRow(refs, file.size, file.size, "Sent", 0);
     pendingDelivery = { refs, size: file.size }; // green "Delivered" only on T_FILE_DONE
     try {
-        // 21.2 — streamed digest from the chunk loop, not a second full-file read.
-        const cs = hasher.finalize_hex();
+        const cs = await fileChecksum(await file.arrayBuffer());
         appendSystemMsg(`SHA-256: ${cs}`);
     } catch (_) {}
 }
@@ -1768,15 +1774,6 @@ function handleFileHdr(pt) {
     const size = Number(v.getBigUint64(1, false));
     const nameLen = v.getUint16(9, false);
     if (pt.length !== 11 + nameLen) { appendSystemMsg("(bad file header)"); return; }
-    // 21.1: never trust the sender's declared size — a modified client could
-    // announce anything and OOM this tab during assembly. Mirror of the
-    // sender-side pick check; honest senders can't hit this branch.
-    if (size > MAX_FILE_SIZE) {
-        appendSystemMsg(`(oversized file rejected · declared ${fmtBytes(size)})`);
-        dropStrayChunks = true; // its chunks are already in flight — ignore them
-        sendPayload(T_FILE_CANCEL, new Uint8Array([0x01]));
-        return;
-    }
     const name = textDec.decode(pt.slice(11, 11 + nameLen));
     // 16.9.6: single recvFile slot — a new header supersedes the old transfer
     // EXPLICITLY (it used to be silently destroyed) and the tid checks below
@@ -1826,9 +1823,6 @@ function handleFileChunk(pt) {
         return;
     }
     const idx = new DataView(pt.buffer, pt.byteOffset, pt.byteLength).getUint32(1, false);
-    // 21.1: out-of-range index from a hostile sender — sparse parts[] would
-    // balloon to idx entries on assembly. No ACK: honest senders never send one.
-    if (idx >= recvFile.totalChunks) return;
     const data = pt.slice(5);
     if (recvFile.parts[idx] !== undefined) {
         // Duplicate (a retransmit raced the late original). Still ACK it: the sender
@@ -1925,11 +1919,7 @@ async function handleFileEnd(pt) {
     f.refs.meta.appendChild(link);
 
     try {
-        // 21.2 — streamed digest over the already-assembled parts, in index
-        // order, instead of re-reading the assembled blob whole.
-        const hasher = new Sha256Stream();
-        for (let i = 0; i < f.totalChunks; i++) hasher.update(f.parts[i]);
-        const cs = hasher.finalize_hex();
+        const cs = await fileChecksum(await blob.arrayBuffer());
         appendSystemMsg(`SHA-256: ${cs}`);
     } catch (_) {}
 }
@@ -2006,20 +1996,3 @@ async function handleFileNack(pt) {
     sendPayload(T_FILE_END, new Uint8Array([tid]));
 }
 
-
-// 23.6b: deep-link join from a scanned QR (#<code>). MUST stay at the very end
-// of the module: the join path reads `let` bindings declared throughout the
-// file (e.g. wsChunksInFlight), and running it mid-module hits the temporal
-// dead zone — the error is then swallowed by the event loop and the join
-// silently never happens (Android field bug). Strip the hash via replaceState
-// first — fragments never reach the server, but the code shouldn't linger in
-// the address bar or browser history either.
-const hashMatch = location.hash.match(/^#(\d{6})$/);
-if (hashMatch) {
-    history.replaceState(null, "", location.pathname + location.search);
-    $("receiver-error").textContent = "";
-    clearRateBanners();
-    show("receiver");
-    $("code-input").value = hashMatch[1];
-    joinAsReceiver();
-}

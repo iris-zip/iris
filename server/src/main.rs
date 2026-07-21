@@ -585,7 +585,7 @@ async fn pair(mut socket: WebSocket, code: String, rooms: Rooms, session_secs: u
     // attempt would put us at or past MAX_CODE_ATTEMPTS, burn the room entirely.
     // Also capture attempt count before increment — only the first 2 connections
     // (the legitimate pair) are allowed to broadcast close signals to each other.
-    let (tx, is_pair_member, was_resume) = {
+    let (tx, is_pair_member) = {
         let mut entry = match rooms.get_mut(&code) {
             Some(r) if r.expires_at > Instant::now() => r,
             _ => {
@@ -610,19 +610,10 @@ async fn pair(mut socket: WebSocket, code: String, rooms: Rooms, session_secs: u
         // or ≥ 2 and stays marked as observer.
         let tx = entry.tx.clone();
         let is_pair_member = attempt_before < 2 || tx.receiver_count() == 1;
-        // 23.7 A pair member joining while exactly one subscriber holds the slot
-        // open is a resume (return from a mobile background event) — the survivor
-        // may be showing the grace banner and needs a "peer is back" signal.
-        let was_resume = attempt_before >= 2 && tx.receiver_count() == 1;
-        (tx, is_pair_member, was_resume)
+        (tx, is_pair_member)
     };
     let mut rx = tx.subscribe();
     let my_id = NEXT_ID.fetch_add(1, Ordering::Relaxed);
-
-    if was_resume {
-        // 23.7 Clears the survivor's "waiting up to 30 s" banner.
-        let _ = tx.send((my_id, Message::Text("BEEM-BACK".into())));
-    }
 
     // 12.3 Max session duration.
     let deadline = tokio::time::Instant::now() + Duration::from_secs(session_secs);
@@ -717,10 +708,6 @@ async fn pair(mut socket: WebSocket, code: String, rooms: Rooms, session_secs: u
         if let Some(mut r) = rooms.get_mut(&code) {
             r.expires_at = Instant::now() + Duration::from_secs(RESUME_GRACE_SECS + 10);
         }
-        // 23.7 Honest wait: tell the survivor the peer went silent and the grace
-        // clock is running (cosmetic banner — old clients ignore unknown Text
-        // markers, and it never changes session state on either side).
-        let _ = tx.send((my_id, Message::Text(format!("BEEM-GRACE:{}", RESUME_GRACE_SECS))));
         let tx_grace = tx.clone();
         tokio::spawn(async move {
             tokio::time::sleep(Duration::from_secs(RESUME_GRACE_SECS)).await;
