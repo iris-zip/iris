@@ -1,7 +1,7 @@
 // 15.4 SRI — placeholders rewritten by scripts/build-sri.sh on release build.
 // Until rewritten, runtime check short-circuits with a dev-mode warning.
-const CRYPTO_JS_SRI   = "sha384-osLYyVEt1lMfPw0Du9COhIM5xpR5Cy6ghrclWm++dvom3G5NKDtA5ClZ5GOXIF/x";
-const CRYPTO_WASM_SRI = "sha384-Mc4lw7tppkvLqGl9bZvDi/n3F4AHU0dd8FVcXReIgtfG2X09BXEgxOmfMBHGkn3O";
+const CRYPTO_JS_SRI   = "sha384-ZjzAD+YebCuGOe7gHZquNblaaBfiILnBvgvSR/+J5tCP3ZdV1h8dwYbXnG1m10Ga";
+const CRYPTO_WASM_SRI = "sha384-BV/Jl8gs64GtFz2v8xd/itc+0yPNvoJrWp5QIO0lhnK4WpVqW+zXKXUl7L/4fhxV";
 const SRI_PLACEHOLDER_PREFIX = "__SRI_";
 
 async function sha384Base64(buf) {
@@ -86,6 +86,7 @@ const {
     x25519_keypair, x25519_shared,
     mlkem_keygen, mlkem_encaps, mlkem_decaps,
     hkdf_combine,
+    Sha256Stream,
 } = cryptoMod;
 
 const views = {
@@ -191,12 +192,6 @@ function setWaitMsg(text, tone) {
     if (label) label.textContent = text;
 }
 
-async function fileChecksum(bytes) {
-    const digest = await crypto.subtle.digest("SHA-256", bytes);
-    return Array.from(new Uint8Array(digest))
-        .map(b => b.toString(16).padStart(2, "0")).join("");
-}
-
 function bytesEq(a, b) {
     if (a.length !== b.length) return false;
     let diff = 0;
@@ -248,6 +243,7 @@ let expectedPeerHash = null;  // peer's expected confirmation tag (directional)
 // Receiver: "await-sender-info" -> "await-hash" -> "chat"
 let step = null;
 let aborted = false;
+let sessionEnded = false; // 23.5: deliberate end-of-chat — suppress the late WS close from resurrecting a view
 let sendCounterWS = 0n;
 let recvCounterWS = -1n; // per-transport strictly increasing; prevents cross-transport replay drops
 // 16.9.2: one counter pair per DC path; nonce[3] = 1 + pathId keeps the four
@@ -505,6 +501,19 @@ async function startSender() {
             sp.textContent = digit;
             bc.appendChild(sp);
         }
+        // 23.6: QR of the join URL, drawn by the vendored local encoder (qr.js).
+        // Degrades silently if the script didn't load; the 6-digit code still works.
+        const qrEl = $("qr-code");
+        qrEl.innerHTML = "";
+        if (typeof qrcode === "function") {
+            const joinUrl = `${location.origin}/#${code}`;
+            const qr = qrcode(0, "M");
+            qr.addData(joinUrl);
+            qr.make();
+            // SVG string comes from our own vendored encoder over our own generated
+            // URL, not user input, innerHTML is safe here.
+            qrEl.innerHTML = qr.createSvgTag({ scalable: true });
+        }
         setWaitMsg("Waiting for peer\u2026", "warn");
         show("sender");
         acquireWakeLock();
@@ -515,7 +524,7 @@ async function startSender() {
 }
 
 function joinAsReceiver() {
-    // Re-entry guard. CONNECTING alone is not enough: the 5th-digit auto-submit
+    // Re-entry guard. CONNECTING alone is not enough: the 6th-digit auto-submit
     // opens the WS in ~ms, so an Enter press right after it finds the socket
     // already OPEN, fires a second join, and the duplicate 65-byte hello lands
     // on the sender's await-ct as a wrong-size frame → "ct size" abort.
@@ -551,6 +560,7 @@ function openWs(code, resume = false) {
     }
     preCloseCode = 0;
     preCloseReason = "";
+    sessionEnded = false; // 23.5: fresh connection — re-arm the close handler
 
     const proto = location.protocol === "https:" ? "wss" : "ws";
     ws = new WebSocket(`${proto}://${location.host}/ws?code=${code}`);
@@ -609,6 +619,14 @@ function openWs(code, resume = false) {
             if (m) {
                 preCloseCode = parseInt(m[1], 10);
                 preCloseReason = m[2];
+                return;
+            }
+            // 23.7 Peer-presence hints from the relay — chip text only, never state.
+            const g = e.data.match(/^BEEM-GRACE:(\d+)$/);
+            if (g && step === "chat") {
+                setChatChip("warn", `Peer connection lost — waiting up to ${g[1]} s…`);
+            } else if (e.data === "BEEM-BACK" && step === "chat") {
+                setChatChip("ok", "Connected");
             }
             return;
         }
@@ -730,6 +748,7 @@ function openWs(code, resume = false) {
     ws.addEventListener("close", (ev) => {
         if (wsGen !== myGen) return; // stale handler from a replaced WS — ignore
         if (aborted) return;
+        if (sessionEnded) return; // 23.5: chat already ended deliberately — ignore the late close
         // 15.10b If the real close frame was stripped (CF Tunnel → 1006), fall back
         // to the text marker the server sent just before closing.
         const rawCode = ev && ev.code;
@@ -756,7 +775,7 @@ function openWs(code, resume = false) {
             if (showRateBanner(code, reason)) {
                 $("receiver-error").textContent = "";
             } else if (code === CLOSE.CODE_FORMAT) {
-                $("receiver-error").textContent = "Invalid code format. Please enter exactly 5 digits.";
+                $("receiver-error").textContent = "Invalid code format. Please enter exactly 6 digits.";
             } else if (code === CLOSE.CODE_MISSING) {
                 $("receiver-error").textContent = "Invalid or expired code. Please try again.";
             } else if (code === CLOSE.SESSION_TIMEOUT) {
@@ -906,6 +925,8 @@ function attemptResume() {
 // 15.9 Peer gone / session ended: disable inputs, flip the header chip to err tone.
 function endChatSession() {
     step = null;
+    sessionEnded = true; // 23.5: mark deliberate end so the late WS close doesn't resurrect a view
+    $("code-input").value = "";
     useRTC = false;
     drainAckWaiters(); // unblock any sendFile/handleFileNack loop waiting on ACK
     settleDcReconnect(); // abandon any in-flight DC rebuild + wake parked loops (16.9.1)
@@ -913,6 +934,8 @@ function endChatSession() {
     releaseWakeLock();
     closeAllDcPaths();
     zeroizeKeys(); // session over (peer left / timeout) — wipe keys
+    previewUrls.forEach(u => URL.revokeObjectURL(u)); // 23.3
+    previewUrls = [];
     for (const id of ["chat-input", "btn-chat-send", "btn-file-pick"]) {
         const el = $(id);
         if (el) el.disabled = true;
@@ -937,16 +960,25 @@ function panicVanish() {
 }
 function _doVanish() {
     aborted = true;
+    sessionEnded = false; // 23.5: back to landing — re-arm for the next session
     step = null;
     useRTC = false;
     drainAckWaiters();
     settleDcReconnect(); // 16.9.1: abandon any DC rebuild + wake parked loops
     stopWsKeepalive();
     releaseWakeLock();
+    // 23.4: plaintext marker so the server can skip resume-grace and tear the
+    // room down immediately — T_BYE above is best-effort (sendPayload silently
+    // no-ops when the WS isn't OPEN), this is the server-authoritative backstop.
+    if (ws && ws.readyState === WebSocket.OPEN) {
+        try { ws.send("BEEM-LEAVE"); } catch (_) {}
+    }
     try { ws && ws.close(); } catch (_) {}
     closeAllDcPaths();
     ws = null;
     zeroizeKeys(); // panic vanish — overwrite then drop all key material
+    previewUrls.forEach(u => URL.revokeObjectURL(u)); // 23.3
+    previewUrls = [];
     pakeState = null;
     sendCounterWS = 0n;
     recvCounterWS = -1n;
@@ -954,6 +986,7 @@ function _doVanish() {
     recvCountersDC = [-1n, -1n, -1n, -1n];
     recvMasksDC = [0n, 0n, 0n, 0n];
     role = currentCode = null;
+    $("qr-code").innerHTML = ""; // 23.6: drop the stale code's QR before the next session
     $("chat-log").innerHTML = "";
     $("chat-input").value = "";
     $("file-status").textContent = "";
@@ -1385,6 +1418,46 @@ function appendChatMsg(direction, text) {
     bubble.className = "bm-msg-bubble";
     bubble.textContent = text;
     wrap.appendChild(bubble);
+    const actions = document.createElement("div");
+    actions.className = "bm-msg-actions";
+    // 23.1 — long messages collapse with a fade + toggle, no auto-scroll on toggle
+    if (text.length > 600) {
+        bubble.classList.add("bm-msg-bubble--collapsed");
+        const toggle = document.createElement("button");
+        toggle.type = "button";
+        toggle.className = "bm-msg-toggle";
+        toggle.textContent = "See more";
+        toggle.addEventListener("click", () => {
+            const collapsed = bubble.classList.toggle("bm-msg-bubble--collapsed");
+            toggle.textContent = collapsed ? "See more" : "See less";
+        });
+        actions.appendChild(toggle);
+    }
+    // 23.2 — per-message copy button; hidden when Clipboard API is unavailable
+    if (navigator.clipboard && navigator.clipboard.writeText) {
+        const copyBtn = document.createElement("button");
+        copyBtn.type = "button";
+        copyBtn.className = "bm-msg-copy";
+        copyBtn.setAttribute("aria-label", "Copy message");
+        copyBtn.textContent = "Copy";
+        let copyTimer = null;
+        copyBtn.addEventListener("click", async () => {
+            try {
+                await navigator.clipboard.writeText(text);
+            } catch (_) {
+                return;
+            }
+            clearTimeout(copyTimer);
+            copyBtn.classList.add("bm-msg-copy--copied");
+            copyBtn.textContent = "Copied";
+            copyTimer = setTimeout(() => {
+                copyBtn.classList.remove("bm-msg-copy--copied");
+                copyBtn.textContent = "Copy";
+            }, 2000);
+        });
+        actions.appendChild(copyBtn);
+    }
+    if (actions.childNodes.length) wrap.appendChild(actions);
     $("chat-log").appendChild(wrap);
     wrap.scrollIntoView({ block: "end" });
 }
@@ -1401,6 +1474,17 @@ function fmtBytes(n) {
     if (n < 1024) return `${n} B`;
     if (n < 1024 * 1024) return `${(n / 1024).toFixed(1)} KB`;
     return `${(n / 1024 / 1024).toFixed(2)} MB`;
+}
+
+// 23.3 — MIME is never sent on the wire; infer preview eligibility from the
+// filename extension alone (display-only, no effect on transfer).
+function imageMimeFor(name) {
+    const ext = (name.split(".").pop() || "").toLowerCase();
+    if (ext === "png") return "image/png";
+    if (ext === "jpg" || ext === "jpeg") return "image/jpeg";
+    if (ext === "gif") return "image/gif";
+    if (ext === "webp") return "image/webp";
+    return null;
 }
 
 function appendFileRow(name, sizeBytes, direction, onCancel) {
@@ -1483,6 +1567,9 @@ function failFileRow(refs, message) {
 const CHUNK_SIZE = 128 * 1024; // 128 KB → encrypted frame ~128 KB + 33 B, safely under Chrome DC 256 KB max
 const MAX_FILE_SIZE = 1 * 1024 * 1024 * 1024; // 1 GB
 const MAX_WS_BUFFER = 512 * 1024; // pause sending when browser send buffer exceeds 512 KB
+const MAX_PREVIEW_SIZE = 10 * 1024 * 1024; // 10 MB — 23.3 inline image preview cap
+// 23.3 — object URLs backing inline thumbnails (sender + receiver); revoked wholesale on session teardown
+let previewUrls = [];
 
 // Sender-side
 async function sendFile(file) {
@@ -1526,10 +1613,26 @@ async function sendFile(file) {
         drainDcWaiters();  // likewise a loop parked on a DC reconnect (16.9.1)
     });
     currentSendRefs = refs;
+    // 23.3 — inline thumbnail from the picked File; display-only, must never affect the transfer.
+    try {
+        const mime = imageMimeFor(file.name) || (file.type && file.type.startsWith("image/") ? file.type : null);
+        if (mime && file.size <= MAX_PREVIEW_SIZE) {
+            const previewUrl = URL.createObjectURL(file);
+            previewUrls.push(previewUrl);
+            const thumb = document.createElement("img");
+            thumb.className = "bm-file-thumb";
+            thumb.alt = "";
+            thumb.src = previewUrl;
+            refs.row.appendChild(thumb);
+        }
+    } catch (_) {}
     const totalChunks = Math.max(1, Math.ceil(file.size / CHUNK_SIZE));
     let sentBytes = 0;
     // Sliding 1-second window: array of [timestamp, bytes] samples
     let speedSamples = [];
+    // 21.2 — streaming checksum: each chunk hashed once as it's read, no
+    // second full-file buffer/read needed at the end.
+    const hasher = new Sha256Stream();
 
     for (let i = 0; i < totalChunks; i++) {
         if (sendCancelled) break;
@@ -1542,6 +1645,7 @@ async function sendFile(file) {
         const offset = i * CHUNK_SIZE;
         const slice = file.slice(offset, Math.min(file.size, offset + CHUNK_SIZE));
         const buf = new Uint8Array(await slice.arrayBuffer());
+        hasher.update(buf); // 21.2 — hash in-flight, index order, once per chunk
         const payload = new Uint8Array(1 + 4 + buf.length);
         payload[0] = tid;
         new DataView(payload.buffer).setUint32(1, i, false);
@@ -1604,7 +1708,8 @@ async function sendFile(file) {
     updateFileRow(refs, file.size, file.size, "Sent", 0);
     pendingDelivery = { refs, size: file.size }; // green "Delivered" only on T_FILE_DONE
     try {
-        const cs = await fileChecksum(await file.arrayBuffer());
+        // 21.2 — streamed digest from the chunk loop, not a second full-file read.
+        const cs = hasher.finalize_hex();
         appendSystemMsg(`SHA-256: ${cs}`);
     } catch (_) {}
 }
@@ -1663,6 +1768,15 @@ function handleFileHdr(pt) {
     const size = Number(v.getBigUint64(1, false));
     const nameLen = v.getUint16(9, false);
     if (pt.length !== 11 + nameLen) { appendSystemMsg("(bad file header)"); return; }
+    // 21.1: never trust the sender's declared size — a modified client could
+    // announce anything and OOM this tab during assembly. Mirror of the
+    // sender-side pick check; honest senders can't hit this branch.
+    if (size > MAX_FILE_SIZE) {
+        appendSystemMsg(`(oversized file rejected · declared ${fmtBytes(size)})`);
+        dropStrayChunks = true; // its chunks are already in flight — ignore them
+        sendPayload(T_FILE_CANCEL, new Uint8Array([0x01]));
+        return;
+    }
     const name = textDec.decode(pt.slice(11, 11 + nameLen));
     // 16.9.6: single recvFile slot — a new header supersedes the old transfer
     // EXPLICITLY (it used to be silently destroyed) and the tid checks below
@@ -1712,6 +1826,9 @@ function handleFileChunk(pt) {
         return;
     }
     const idx = new DataView(pt.buffer, pt.byteOffset, pt.byteLength).getUint32(1, false);
+    // 21.1: out-of-range index from a hostile sender — sparse parts[] would
+    // balloon to idx entries on assembly. No ACK: honest senders never send one.
+    if (idx >= recvFile.totalChunks) return;
     const data = pt.slice(5);
     if (recvFile.parts[idx] !== undefined) {
         // Duplicate (a retransmit raced the late original). Still ACK it: the sender
@@ -1776,11 +1893,24 @@ async function handleFileEnd(pt) {
         failFileRow(f.refs, `Incomplete \u00b7 ${fmtBytes(f.received)} / ${fmtBytes(f.size)}`);
         return;
     }
-    const blob = new Blob(f.parts);
+    // 23.3 — image previews get a typed Blob so the <img> renders; non-image
+    // behavior (untyped Blob, revoke-on-download-click) stays byte-identical.
+    const previewMime = imageMimeFor(f.name);
+    const isPreviewable = previewMime && f.size <= MAX_PREVIEW_SIZE;
+    const blob = isPreviewable ? new Blob(f.parts, { type: previewMime }) : new Blob(f.parts);
     const url = URL.createObjectURL(blob);
 
     completeFileRow(f.refs, f.size, "Received");
     sendPayload(T_FILE_DONE, new Uint8Array(0)); // assembly verified — confirm delivery to the sender
+
+    if (isPreviewable) {
+        previewUrls.push(url);
+        const thumb = document.createElement("img");
+        thumb.className = "bm-file-thumb";
+        thumb.alt = "";
+        thumb.src = url;
+        f.refs.row.appendChild(thumb);
+    }
 
     // Replace meta with a download anchor inside the existing row.
     f.refs.meta.textContent = "";
@@ -1788,11 +1918,18 @@ async function handleFileEnd(pt) {
     link.href = url;
     link.download = f.name;
     link.textContent = `Download \u00b7 ${fmtBytes(f.size)}`;
-    link.addEventListener("click", () => setTimeout(() => URL.revokeObjectURL(url), 100));
+    // Non-image only: the same URL feeds the thumbnail above, so it must outlive the click.
+    if (!isPreviewable) {
+        link.addEventListener("click", () => setTimeout(() => URL.revokeObjectURL(url), 100));
+    }
     f.refs.meta.appendChild(link);
 
     try {
-        const cs = await fileChecksum(await blob.arrayBuffer());
+        // 21.2 — streamed digest over the already-assembled parts, in index
+        // order, instead of re-reading the assembled blob whole.
+        const hasher = new Sha256Stream();
+        for (let i = 0; i < f.totalChunks; i++) hasher.update(f.parts[i]);
+        const cs = hasher.finalize_hex();
         appendSystemMsg(`SHA-256: ${cs}`);
     } catch (_) {}
 }
@@ -1869,3 +2006,20 @@ async function handleFileNack(pt) {
     sendPayload(T_FILE_END, new Uint8Array([tid]));
 }
 
+
+// 23.6b: deep-link join from a scanned QR (#<code>). MUST stay at the very end
+// of the module: the join path reads `let` bindings declared throughout the
+// file (e.g. wsChunksInFlight), and running it mid-module hits the temporal
+// dead zone — the error is then swallowed by the event loop and the join
+// silently never happens (Android field bug). Strip the hash via replaceState
+// first — fragments never reach the server, but the code shouldn't linger in
+// the address bar or browser history either.
+const hashMatch = location.hash.match(/^#(\d{6})$/);
+if (hashMatch) {
+    history.replaceState(null, "", location.pathname + location.search);
+    $("receiver-error").textContent = "";
+    clearRateBanners();
+    show("receiver");
+    $("code-input").value = hashMatch[1];
+    joinAsReceiver();
+}

@@ -59,7 +59,7 @@
                "Fira Code", "Consolas", monospace;
 
   /* Type scale — fluid via clamp() */
-  --t-display: clamp(2.75rem, 10vw, 5rem);
+  --t-display: clamp(2.75rem, 9vw, 4rem);
   --t-h1:      clamp(1.625rem, 3.5vw, 2.25rem);
   --t-h2:      clamp(1.25rem, 2.5vw, 1.625rem);
   --t-body:    clamp(0.9375rem, 1.5vw, 1rem);
@@ -519,6 +519,11 @@ img, svg { display: block; max-width: 100%; }
   text-align: center;
 }
 
+/* 3+3 grouping: visual gap only, copied text stays unspaced */
+#big-code > span:nth-child(4) {
+  margin-left: 0.55em;
+}
+
 @media (prefers-color-scheme: dark) {
   #big-code { border-color: rgba(143, 163, 248, 0.22); }
 }
@@ -526,6 +531,25 @@ img, svg { display: block; max-width: 100%; }
 .bm-code-actions {
   display: flex;
   justify-content: center;
+}
+
+/* 23.6 QR pairing: white quiet-zone box regardless of theme (QRs need a
+   light background to stay scannable in dark mode). Empty <div> when the
+   vendored encoder didn't load or generate anything, so it collapses. */
+.bm-qr {
+  background: #fff;
+  padding: var(--sp-3);
+  border-radius: var(--r-sm);
+  width: fit-content;
+  margin: 0 auto;
+}
+
+.bm-qr:empty { display: none; }
+
+.bm-qr svg {
+  width: 10rem;
+  height: 10rem;
+  display: block;
 }
 
 /* ── 9. STATUS CHIP ──────────────────────────────────────────────── */
@@ -820,14 +844,57 @@ img, svg { display: block; max-width: 100%; }
 /* ── 12. CHAT MESSAGES ───────────────────────────────────────────── */
 .bm-msg {
   display: flex;
+  flex-direction: column;
   max-width: 82%;
   word-break: break-word;
   overflow-wrap: anywhere;
   animation: bm-view-in var(--dur-base) var(--ease) both;
 }
 
-.bm-msg--out { align-self: flex-end; }
-.bm-msg--in  { align-self: flex-start; }
+.bm-msg--out { align-self: flex-end; align-items: flex-end; }
+.bm-msg--in  { align-self: flex-start; align-items: flex-start; }
+
+/* 23.1 — collapse long messages behind a fade + toggle */
+.bm-msg-bubble--collapsed {
+  max-height: 9em;
+  overflow: hidden;
+  mask-image: linear-gradient(to bottom, #000 80%, transparent 100%);
+  -webkit-mask-image: linear-gradient(to bottom, #000 80%, transparent 100%);
+}
+
+/* 23.2 — actions row holds the collapse toggle and copy button side by side */
+.bm-msg-actions {
+  display: flex;
+  align-items: center;
+  gap: var(--sp-3);
+  margin-top: var(--sp-1);
+}
+
+.bm-msg-toggle {
+  padding: 0;
+  border: none;
+  background: none;
+  font-size: var(--t-small);
+  color: var(--fg-muted);
+  cursor: pointer;
+  transition: color var(--dur-fast) var(--ease);
+}
+
+.bm-msg-toggle:hover { color: var(--fg-default); }
+
+.bm-msg-copy {
+  padding: 0;
+  border: none;
+  background: none;
+  font-size: var(--t-small);
+  color: var(--fg-muted);
+  cursor: pointer;
+  transition: color var(--dur-fast) var(--ease);
+}
+
+.bm-msg-copy:hover { color: var(--fg-default); }
+
+.bm-msg-copy--copied { color: var(--status-ok); }
 
 .bm-msg-bubble {
   padding: var(--sp-3) var(--sp-4);
@@ -956,6 +1023,16 @@ img, svg { display: block; max-width: 100%; }
 }
 
 .bm-progress-fill--complete { background: var(--status-ok); }
+
+/* 23.3 — inline thumbnail, display-only */
+.bm-file-thumb {
+  display: block;
+  max-width: 100%;
+  max-height: 12rem;
+  width: auto;
+  border-radius: var(--r-sm);
+  margin-top: var(--sp-2);
+}
 
 /* File status aria-live */
 #file-status {

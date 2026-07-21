@@ -1,6 +1,6 @@
 # Iris
 
-End-to-end encrypted, post-quantum-hybrid, ephemeral text and file transfer between any devices — Apple, Android, PC, Mac, console, anything with a browser. Pair two devices with a 5-digit code, type or drop a file, done. No accounts, no ads, no logs, no persistence. Live at [iriszip.com](https://iriszip.com).
+End-to-end encrypted, post-quantum-hybrid, ephemeral text and file transfer between any devices — Apple, Android, PC, Mac, console, anything with a browser. Pair two devices with a 6-digit code, type or drop a file, done. No accounts, no ads, no logs, no persistence. Live at [iriszip.com](https://iriszip.com).
 
 > Iris was originally codenamed **Beem**; the wire-protocol identifiers (`beem-v1 …`, `BEEM-CLOSE:`, `BEEM_*` env vars) intentionally retain the old name for protocol and deployment stability.
 
@@ -30,16 +30,16 @@ Open `http://127.0.0.1:8080` in two browser tabs (or tab + phone on the same LAN
 
 ## Usage
 
-1. On the first tab click **Send**. A 5-digit code appears.
+1. On the first tab click **Send**. A 6-digit code appears.
 2. On the second tab click **Receive**, enter the code, hit **Join**.
 3. When both tabs show the chat view, the hybrid handshake finished successfully.
 4. Type text, or click **Send file…** to transfer a file (up to 1 GB).
 
-The 5-digit code is valid for 60 seconds; each code is single-use and pairs exactly two clients.
+The 6-digit code is valid for 60 seconds; each code is single-use and pairs exactly two clients.
 
 ## How the security works
 
-- **PAKE (SPAKE2 over Ed25519):** the 5-digit code is never sent over the network; both sides derive a shared secret *only if* they typed the same code. A wrong code produces a different key and the handshake aborts before any data flows.
+- **PAKE (SPAKE2 over Ed25519):** the 6-digit code is never sent over the network; both sides derive a shared secret *only if* they typed the same code. A wrong code produces a different key and the handshake aborts before any data flows.
 - **Classical KEX (X25519):** standard elliptic-curve Diffie-Hellman.
 - **Post-quantum KEX (ML-KEM-768):** the NIST-standardized Kyber lattice KEM. Resistant to attackers with large-scale quantum computers.
 - **Key combine:** `key = HKDF-SHA256(PAKE_key ‖ X25519_shared ‖ ML-KEM_shared, salt=transcript, info="beem-v1 aead")` — the salt binds the full public handshake transcript. The session key is safe as long as *any one* of the three primitives remains unbroken.
@@ -70,7 +70,7 @@ The full rationale lives in the project's internal design notes.
 - `POST /new` rate-limited per source IP (10-request burst, ~10/min sustained).
 - WS frame and message size capped at 200 KB (room for one 128 KB encrypted chunk).
 - Session duration capped at 60 minutes; server closes cleanly after.
-- Strict `^\d{5}$` validation of the code query parameter.
+- Strict `^\d{6}$` validation of the code query parameter.
 - Response headers: HSTS, strict CSP, `X-Frame-Options: DENY`, `X-Content-Type-Options: nosniff`, `Referrer-Policy: no-referrer`.
 - Zero content, IP, or code in server logs.
 
@@ -135,4 +135,4 @@ When testing, verify:
 Iris is developed in numbered phases. Post-beta plans include:
 
 - Cloudflare Tunnel deployment (Phase 13) for public hosting with hidden home IP and free TLS.
-- SCSA QRNG entropy integration (Phase 14) so the 5-digit codes come from a verifiable quantum random-number generator, with OS CSPRNG as a fallback.
+- SCSA QRNG entropy integration (Phase 14) so the 6-digit codes come from a verifiable quantum random-number generator, with OS CSPRNG as a fallback.

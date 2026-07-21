@@ -101,6 +101,15 @@ async fn send_close_signal(socket: &mut WebSocket, code: u16, reason: &str) {
     .await;
 }
 
+// 23.4 Client sends this plaintext marker (mirrors 15.10b's BEEM-CLOSE
+// workaround — plain Text frames survive Cloudflare Tunnel where native WS
+// close semantics are unreliable) just before it closes on panic-vanish, so
+// the server can skip the resume-grace and tear the room down immediately
+// instead of leaving the peer to wait out RESUME_GRACE_SECS.
+fn is_leave_marker(t: &str) -> bool {
+    t == "BEEM-LEAVE"
+}
+
 #[derive(Clone)]
 struct Room {
     tx: broadcast::Sender<(u64, Message)>,
@@ -576,7 +585,7 @@ async fn pair(mut socket: WebSocket, code: String, rooms: Rooms, session_secs: u
     // attempt would put us at or past MAX_CODE_ATTEMPTS, burn the room entirely.
     // Also capture attempt count before increment — only the first 2 connections
     // (the legitimate pair) are allowed to broadcast close signals to each other.
-    let (tx, is_pair_member) = {
+    let (tx, is_pair_member, was_resume) = {
         let mut entry = match rooms.get_mut(&code) {
             Some(r) if r.expires_at > Instant::now() => r,
             _ => {
@@ -601,10 +610,19 @@ async fn pair(mut socket: WebSocket, code: String, rooms: Rooms, session_secs: u
         // or ≥ 2 and stays marked as observer.
         let tx = entry.tx.clone();
         let is_pair_member = attempt_before < 2 || tx.receiver_count() == 1;
-        (tx, is_pair_member)
+        // 23.7 A pair member joining while exactly one subscriber holds the slot
+        // open is a resume (return from a mobile background event) — the survivor
+        // may be showing the grace banner and needs a "peer is back" signal.
+        let was_resume = attempt_before >= 2 && tx.receiver_count() == 1;
+        (tx, is_pair_member, was_resume)
     };
     let mut rx = tx.subscribe();
     let my_id = NEXT_ID.fetch_add(1, Ordering::Relaxed);
+
+    if was_resume {
+        // 23.7 Clears the survivor's "waiting up to 30 s" banner.
+        let _ = tx.send((my_id, Message::Text("BEEM-BACK".into())));
+    }
 
     // 12.3 Max session duration.
     let deadline = tokio::time::Instant::now() + Duration::from_secs(session_secs);
@@ -612,6 +630,11 @@ async fn pair(mut socket: WebSocket, code: String, rooms: Rooms, session_secs: u
     // 15.9 If the peer broadcasts a Close through our room channel, forward it to our own
     // socket and mark so the post-loop step doesn't rebroadcast another Close back at them.
     let mut peer_closed_us = false;
+
+    // 23.4 Set when we ourselves sent BEEM-LEAVE (deliberate panic-vanish exit).
+    // Skips the post-loop resume-grace entirely — we already evicted the peer
+    // and removed the room, there is nothing left to hold open.
+    let mut deliberate_leave = false;
 
     // 17.4 Audit counters (bytes only — no content, no IPs, no codes).
     let started = Instant::now();
@@ -626,6 +649,19 @@ async fn pair(mut socket: WebSocket, code: String, rooms: Rooms, session_secs: u
             }
             incoming = socket.recv() => {
                 match incoming {
+                    Some(Ok(Message::Text(ref t))) if is_leave_marker(t) => {
+                        // 23.4 Deliberate vanish: broadcast peer-left immediately (the
+                        // peer's own rx arm turns this Close into send_close_signal with
+                        // CLOSE_PEER_LEFT), skip resume-grace, drop the room now. Do not
+                        // forward this marker to the peer as data.
+                        let _ = tx.send((my_id, Message::Close(Some(CloseFrame {
+                            code: CLOSE_PEER_LEFT,
+                            reason: "".into(),
+                        }))));
+                        deliberate_leave = true;
+                        rooms.remove(&code);
+                        break;
+                    }
                     Some(Ok(Message::Close(_))) | None => break,
                     Some(Ok(msg)) => {
                         bytes_in += msg_payload_len(&msg) as u64;
@@ -677,10 +713,14 @@ async fn pair(mut socket: WebSocket, code: String, rooms: Rooms, session_secs: u
     // If someone resubscribes to `tx` in that window, receiver_count climbs
     // above 1 (survivor + reconnect) and we skip the close. Bump room expiry
     // so the sweeper doesn't GC the room mid-grace.
-    if !peer_closed_us && is_pair_member {
+    if !peer_closed_us && !deliberate_leave && is_pair_member {
         if let Some(mut r) = rooms.get_mut(&code) {
             r.expires_at = Instant::now() + Duration::from_secs(RESUME_GRACE_SECS + 10);
         }
+        // 23.7 Honest wait: tell the survivor the peer went silent and the grace
+        // clock is running (cosmetic banner — old clients ignore unknown Text
+        // markers, and it never changes session state on either side).
+        let _ = tx.send((my_id, Message::Text(format!("BEEM-GRACE:{}", RESUME_GRACE_SECS))));
         let tx_grace = tx.clone();
         tokio::spawn(async move {
             tokio::time::sleep(Duration::from_secs(RESUME_GRACE_SECS)).await;
@@ -940,5 +980,15 @@ mod tests {
         assert_eq!(msg_payload_len(&Message::Ping(vec![1, 2, 3])), 0);
         assert_eq!(msg_payload_len(&Message::Pong(vec![1, 2, 3])), 0);
         assert_eq!(msg_payload_len(&Message::Close(None)), 0);
+    }
+
+    // TEST-S-014 — 23.4 BEEM-LEAVE marker recognition
+    #[test]
+    fn test_is_leave_marker() {
+        assert!(is_leave_marker("BEEM-LEAVE"));
+        assert!(!is_leave_marker("BEEM-CLOSE:4007:"));
+        assert!(!is_leave_marker("beem-leave"));
+        assert!(!is_leave_marker(""));
+        assert!(!is_leave_marker("BEEM-LEAVEX"));
     }
 }

@@ -18,11 +18,12 @@ cd "$(dirname "$0")/.."
 
 CLIENT=client
 APP_JS="$CLIENT/app.js"
+QR_JS="$CLIENT/qr.js"
 INDEX="$CLIENT/index.html"
 CRYPTO_JS="$CLIENT/pkg/iris_crypto.js"
 CRYPTO_WASM="$CLIENT/pkg/iris_crypto_bg.wasm"
 
-for f in "$APP_JS" "$INDEX" "$CRYPTO_JS" "$CRYPTO_WASM"; do
+for f in "$APP_JS" "$QR_JS" "$INDEX" "$CRYPTO_JS" "$CRYPTO_WASM"; do
     [[ -f "$f" ]] || { echo "missing: $f" >&2; exit 1; }
 done
 
@@ -58,6 +59,33 @@ sed -i -E \
 
 grep -q "src=\"app.js?v=$APP_JS_V\" integrity=\"$APP_JS_SRI\"" "$INDEX" || { echo "failed to inject app.js integrity" >&2; exit 1; }
 
+# 23.6 — vendored QR encoder ships verbatim (no build step), so just hash the
+# file as-is and stamp its <script> tag the same way as app.js.
+QR_JS_SRI="sha384-$(sha384_b64 "$QR_JS")"
+echo "qr.js        $QR_JS_SRI"
+QR_JS_V=$(printf "%s" "$QR_JS_SRI" | tr -cd "a-zA-Z0-9" | cut -c7-18)
+
+sed -i -E \
+    "s|<script src=\"qr\.js(\?v=[a-zA-Z0-9]*)?\" defer( integrity=\"[^\"]*\")?></script>|<script src=\"qr.js?v=$QR_JS_V\" defer integrity=\"$QR_JS_SRI\"></script>|g" \
+    "$INDEX"
+
+grep -q "src=\"qr.js?v=$QR_JS_V\" defer integrity=\"$QR_JS_SRI\"" "$INDEX" || { echo "failed to inject qr.js integrity" >&2; exit 1; }
+
+# CSS cache-busting (no SRI needed — not executable): stamp ?v=<hash prefix>
+# on each stylesheet link so a content change mints a new URL and the
+# Cloudflare edge can never serve a stale copy (July 2026 recolor lesson).
+# branding.css is excluded: it's a dynamic server route (17.3), not a file.
+for css in style.css; do
+    CSS_FILE="$CLIENT/$css"
+    [[ -f "$CSS_FILE" ]] || { echo "missing: $CSS_FILE" >&2; exit 1; }
+    CSS_V=$(sha384_b64 "$CSS_FILE" | tr -cd "a-zA-Z0-9" | cut -c1-12)
+    sed -i -E \
+        "s|<link rel=\"stylesheet\" href=\"$css(\?v=[a-zA-Z0-9]*)?\">|<link rel=\"stylesheet\" href=\"$css?v=$CSS_V\">|g" \
+        "$INDEX"
+    grep -q "href=\"$css?v=$CSS_V\"" "$INDEX" || { echo "failed to version $css link" >&2; exit 1; }
+    echo "$css      ?v=$CSS_V"
+done
+
 echo "SRI hashes injected."
 
 # 15.5 — rewrite HASHES.md. Hashes are written as plain hex so a user can
@@ -68,6 +96,7 @@ sha384_hex() {
     openssl dgst -sha384 "$1" | awk '{print $NF}'
 }
 APP_JS_HEX=$(sha384_hex "$APP_JS")
+QR_JS_HEX=$(sha384_hex "$QR_JS")
 CRYPTO_JS_HEX=$(sha384_hex "$CRYPTO_JS")
 CRYPTO_WASM_HEX=$(sha384_hex "$CRYPTO_WASM")
 GIT_SHORT=$(git rev-parse --short HEAD 2>/dev/null || echo "(no git)")
@@ -91,6 +120,7 @@ exact code in this git commit.
 | File | sha384 (hex) | sha384 (SRI / base64) |
 |---|---|---|
 | \`client/app.js\` | \`$APP_JS_HEX\` | \`$APP_JS_SRI\` |
+| \`client/qr.js\` | \`$QR_JS_HEX\` | \`$QR_JS_SRI\` |
 | \`client/pkg/iris_crypto.js\` | \`$CRYPTO_JS_HEX\` | \`$CRYPTO_JS_SRI\` |
 | \`client/pkg/iris_crypto_bg.wasm\` | \`$CRYPTO_WASM_HEX\` | \`$CRYPTO_WASM_SRI\` |
 
@@ -99,7 +129,7 @@ exact code in this git commit.
 From the repo root, after a clean checkout:
 
 \`\`\`
-sha384sum client/app.js client/pkg/iris_crypto.js client/pkg/iris_crypto_bg.wasm
+sha384sum client/app.js client/qr.js client/pkg/iris_crypto.js client/pkg/iris_crypto_bg.wasm
 \`\`\`
 
 The hex values must match the table above. If they don't, either the
