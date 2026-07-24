@@ -882,19 +882,35 @@ img, svg { display: block; max-width: 100%; }
 
 .bm-msg-toggle:hover { color: var(--fg-default); }
 
+/* 23.9 — icon copy button: quiet by default, revealed on message hover (desktop),
+   kept faintly visible + tappable on touch devices where there is no hover. */
 .bm-msg-copy {
-  padding: 0;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  padding: var(--sp-1);
   border: none;
   background: none;
-  font-size: var(--t-small);
   color: var(--fg-muted);
   cursor: pointer;
-  transition: color var(--dur-fast) var(--ease);
+  border-radius: var(--r-sm);
+  opacity: 0;
+  transition: opacity var(--dur-fast) var(--ease), color var(--dur-fast) var(--ease);
 }
+
+.bm-msg-copy svg { display: block; }
+
+.bm-msg:hover .bm-msg-copy,
+.bm-msg-copy:focus-visible { opacity: 1; }
 
 .bm-msg-copy:hover { color: var(--fg-default); }
 
-.bm-msg-copy--copied { color: var(--status-ok); }
+.bm-msg-copy--copied { color: var(--status-ok); opacity: 1; }
+
+/* Touch devices have no hover — keep the icon discoverable and tappable. */
+@media (hover: none) {
+  .bm-msg-copy { opacity: 0.5; }
+}
 
 .bm-msg-bubble {
   padding: var(--sp-3) var(--sp-4);
@@ -1027,11 +1043,59 @@ img, svg { display: block; max-width: 100%; }
 /* 23.3 — inline thumbnail, display-only */
 .bm-file-thumb {
   display: block;
+  /* .bm-file-row is a column flex container, whose default align-items:stretch
+     forces img children to the full row width and overrides width:auto — the
+     aspect ratio collapses. flex-start keeps the intrinsic ratio. */
+  align-self: flex-start;
   max-width: 100%;
   max-height: 12rem;
   width: auto;
+  height: auto;
+  object-fit: contain;
   border-radius: var(--r-sm);
   margin-top: var(--sp-2);
+}
+
+/* Staged image awaiting confirmation — sits directly above the input bar. */
+.bm-img-stage {
+  display: flex;
+  align-items: center;
+  gap: var(--sp-3);
+  padding: var(--sp-3) max(var(--sp-4), env(safe-area-inset-left));
+  background: var(--bg-raised);
+  border-top: 1px solid var(--border-default);
+  flex-shrink: 0;
+}
+
+.bm-img-stage-thumb {
+  display: block;
+  width: auto;
+  height: auto;
+  max-width: 6rem;
+  max-height: 4rem;
+  object-fit: contain;
+  border-radius: var(--r-sm);
+  flex-shrink: 0;
+}
+
+.bm-img-stage-info {
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+  flex: 1;
+}
+
+.bm-img-stage-name {
+  font-family: var(--font-mono);
+  font-size: var(--fs-sm);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.bm-img-stage-size {
+  font-size: var(--fs-sm);
+  color: var(--text-muted);
 }
 
 /* File status aria-live */

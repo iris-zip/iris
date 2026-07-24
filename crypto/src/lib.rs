@@ -8,7 +8,7 @@ use ml_kem::{
     EncodedSizeUser, KemCore, MlKem768,
 };
 use rand_core::OsRng;
-use sha2::Sha256;
+use sha2::{Digest, Sha256};
 use spake2::{Ed25519Group, Identity, Password, Spake2};
 use wasm_bindgen::prelude::*;
 use x25519_dalek::{PublicKey, StaticSecret};
@@ -201,6 +201,33 @@ pub fn start_pake(code: &str, role: &str) -> Result<PakeState, JsError> {
     })
 }
 
+// 21.2 Streaming SHA-256 for file checksums: chunks are hashed as they pass
+// through the transfer path, so neither side materializes the whole file in a
+// second buffer just to hash it (previously a 2× RAM spike on receive).
+#[wasm_bindgen]
+pub struct Sha256Stream {
+    inner: Sha256,
+}
+
+#[wasm_bindgen]
+impl Sha256Stream {
+    #[wasm_bindgen(constructor)]
+    #[allow(clippy::new_without_default)]
+    pub fn new() -> Sha256Stream {
+        Sha256Stream { inner: Sha256::new() }
+    }
+
+    pub fn update(&mut self, chunk: &[u8]) {
+        self.inner.update(chunk);
+    }
+
+    /// Lowercase hex digest; resets the state so the handle can't double-finalize.
+    pub fn finalize_hex(&mut self) -> String {
+        let done = std::mem::replace(&mut self.inner, Sha256::new());
+        done.finalize().iter().map(|b| format!("{b:02x}")).collect()
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -362,5 +389,26 @@ mod tests {
         assert_eq!(derived_a.len(), 32);
     }
 
+    // TEST-W-011 — 21.2 streaming SHA-256: known vectors + split/one-shot equivalence
+    #[wasm_bindgen_test]
+    fn test_sha256_stream() {
+        let mut s = Sha256Stream::new();
+        assert_eq!(
+            s.finalize_hex(),
+            "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+        );
+        let mut s = Sha256Stream::new();
+        s.update(b"abc");
+        assert_eq!(
+            s.finalize_hex(),
+            "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad"
+        );
+        let mut split = Sha256Stream::new();
+        split.update(b"hello ");
+        split.update(b"streaming ");
+        split.update(b"world");
+        let mut oneshot = Sha256Stream::new();
+        oneshot.update(b"hello streaming world");
+        assert_eq!(split.finalize_hex(), oneshot.finalize_hex());
+    }
 }
-

@@ -43,6 +43,20 @@ const WS_COOLDOWN_SECS: u64 = 30;
 // room for legit reconnects (page refresh, tab close + retry) without burning
 // a code on the first slip-up.
 const MAX_CODE_ATTEMPTS: u32 = 5;
+// Cap on uncounted mobile-resume rejoins per room (see Room.resumes). 64 covers
+// hours of aggressive picker/screen-lock cycling; an attacker spraying resumes
+// still needs the live code within a grace window and is IP-rate-limited anyway.
+const MAX_RESUME_JOINS: u32 = 64;
+
+// A join is a mobile resume, not a pairing/attack attempt, iff the legitimate
+// pair already formed (attempt_before >= 2) and at most one survivor holds the
+// room open (receiver_count <= 1: exactly 1 = peer waiting out the grace
+// banner, 0 = both sides backgrounded simultaneously — phone↔phone transfer).
+// An attacker probing an ACTIVE session meets a full room (2 subscribers) and
+// stays on the counted path.
+fn is_resume_join(attempt_before: u32, receiver_count: usize) -> bool {
+    attempt_before >= 2 && receiver_count <= 1
+}
 
 // Per-IP hard cap on simultaneously open WS connections. Prevents a botnet from
 // accumulating idle sessions up to the 5-min session timeout. Normal flow uses
@@ -117,6 +131,12 @@ struct Room {
     // 15.11 Per-code attempt counter; incremented on every successful room
     // lookup in `pair()`. Once it reaches MAX_CODE_ATTEMPTS the room is removed.
     attempts: u32,
+    // Mobile-resume joins: every Android
+    // file-picker / screen-lock cycle reconnects the WS. These must not spend
+    // the brute-force budget above or a long session burns its own room
+    // mid-transfer — but they get their own generous cap so an uncounted
+    // path is never an unlimited one.
+    resumes: u32,
 }
 
 type Rooms = Arc<DashMap<String, Room>>;
@@ -160,6 +180,62 @@ struct WsParams {
 #[derive(Serialize)]
 struct NewCodeResponse {
     code: String,
+}
+
+// 22.3 Ephemeral TURN credentials (coturn TURN REST API / use-auth-secret).
+// The relay secret and URLs live ONLY in the server's environment (deploy-only,
+// never in the repo); the static long-term credential is retired. A scraped
+// credential expires after TURN_CRED_TTL_SECS, so it can't be reused to steal
+// relay bandwidth at public launch.
+const TURN_CRED_TTL_SECS: u64 = 2 * 60 * 60;
+
+#[derive(Clone)]
+struct TurnCfg {
+    secret: Vec<u8>,
+    urls: Vec<String>,
+}
+
+// Present only when both env vars are set (production). Absent in local dev/CI,
+// where /turn.json 404s and the client falls back to public STUN — unchanged.
+fn load_turn_cfg() -> Option<TurnCfg> {
+    let secret = std::env::var("IRIS_TURN_SECRET").ok().filter(|s| !s.is_empty())?;
+    let urls: Vec<String> = std::env::var("IRIS_TURN_URLS")
+        .ok()?
+        .split(',')
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty())
+        .collect();
+    if urls.is_empty() {
+        return None;
+    }
+    Some(TurnCfg { secret: secret.into_bytes(), urls })
+}
+
+#[derive(Serialize)]
+struct TurnJson {
+    urls: Vec<String>,
+    username: String,
+    credential: String,
+}
+
+// (username, credential): username = <unix expiry>, credential =
+// base64(HMAC-SHA1(secret, username)) — exactly what coturn's use-auth-secret
+// recomputes and validates.
+fn turn_credential(secret: &[u8], now_unix: u64) -> (String, String) {
+    use base64::Engine;
+    use hmac::{Hmac, Mac};
+    let username = (now_unix + TURN_CRED_TTL_SECS).to_string();
+    let mut mac = <Hmac<sha1::Sha1>>::new_from_slice(secret).expect("HMAC accepts any key length");
+    mac.update(username.as_bytes());
+    let credential = base64::engine::general_purpose::STANDARD.encode(mac.finalize().into_bytes());
+    (username, credential)
+}
+
+fn now_unix() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0)
 }
 
 fn is_valid_code(s: &str) -> bool {
@@ -228,6 +304,18 @@ async fn main() {
             .expect("governor config"),
     );
 
+    // 22.3 /turn.json config (deploy-only env; None in dev → route 404s) + its own
+    // rate-limit bucket, separate from /new so a code request and a cred fetch
+    // don't share a budget.
+    let turn_cfg = load_turn_cfg();
+    let turn_governor = Arc::new(
+        GovernorConfigBuilder::default()
+            .per_second(6)
+            .burst_size(10)
+            .finish()
+            .expect("turn governor config"),
+    );
+
     // 12.6 Security headers.
     let sec_headers = tower::ServiceBuilder::new()
         .layer(SetResponseHeaderLayer::overriding(
@@ -241,7 +329,7 @@ async fn main() {
                  script-src 'self' 'wasm-unsafe-eval' blob:; \
                  style-src 'self'; \
                  connect-src 'self' ws: wss:; \
-                 img-src 'self' data:; \
+                 img-src 'self' data: blob:; \
                  object-src 'none'; \
                  frame-ancestors 'none'; \
                  base-uri 'self'",
@@ -264,6 +352,14 @@ async fn main() {
         .route(
             "/new",
             post(new_code).layer(GovernorLayer { config: governor_conf }),
+        )
+        .route(
+            "/turn.json",
+            get(move || {
+                let cfg = turn_cfg.clone();
+                async move { turn_json(cfg).await }
+            })
+            .layer(GovernorLayer { config: turn_governor }),
         )
         .route("/ws", get(ws_handler))
         .route("/branding.css", get(move || {
@@ -296,7 +392,7 @@ async fn main() {
 fn sweep_maps(rooms: &Rooms, rate_limits: &RateLimits, concurrent: &Concurrent, now: Instant) {
     let window = Duration::from_secs(WS_WINDOW_SECS);
     let ban_medium_window = Duration::from_secs(BAN_MEDIUM_WINDOW_SECS);
-    rooms.retain(|_, r| r.expires_at > now);
+    rooms.retain(|_, r| r.expires_at > now || (r.attempts >= 2 && r.tx.receiver_count() > 0));
     // 15.2 + 15.3 GC: keep entries with any active state or recent history.
     rate_limits.retain(|_, s| {
         let has_recent = s.attempts.back().map_or(false, |t| now.duration_since(*t) < window);
@@ -345,12 +441,22 @@ async fn new_code(State(state): State<AppState>) -> Result<Json<NewCodeResponse>
                 tx,
                 expires_at: Instant::now() + Duration::from_secs(CODE_TTL_SECS),
                 attempts: 0,
+                resumes: 0,
             });
             return Ok(Json(NewCodeResponse { code }));
         }
     }
     // 100k codes — hitting 1000 retries requires >99% occupancy; return 503 instead of looping forever
     Err(StatusCode::SERVICE_UNAVAILABLE)
+}
+
+// 22.3 GET /turn.json — mints a short-lived TURN REST credential. Overrides the
+// old static file. Absent config (local dev) → 404, so the client falls back to
+// public STUN exactly as before. Rate-limited at the router like /new.
+async fn turn_json(cfg: Option<TurnCfg>) -> Result<Json<TurnJson>, StatusCode> {
+    let cfg = cfg.ok_or(StatusCode::NOT_FOUND)?;
+    let (username, credential) = turn_credential(&cfg.secret, now_unix());
+    Ok(Json(TurnJson { urls: cfg.urls, username, credential }))
 }
 
 // 15.2 + 15.3 Check per-IP WS connect; record this attempt; escalate ban tiers if warranted.
@@ -585,7 +691,7 @@ async fn pair(mut socket: WebSocket, code: String, rooms: Rooms, session_secs: u
     // attempt would put us at or past MAX_CODE_ATTEMPTS, burn the room entirely.
     // Also capture attempt count before increment — only the first 2 connections
     // (the legitimate pair) are allowed to broadcast close signals to each other.
-    let (tx, is_pair_member) = {
+    let (tx, is_pair_member, was_resume) = {
         let mut entry = match rooms.get_mut(&code) {
             Some(r) if r.expires_at > Instant::now() => r,
             _ => {
@@ -594,12 +700,25 @@ async fn pair(mut socket: WebSocket, code: String, rooms: Rooms, session_secs: u
             }
         };
         let attempt_before = entry.attempts;
-        entry.attempts += 1;
-        if entry.attempts >= MAX_CODE_ATTEMPTS {
-            drop(entry); // release the write lock before the DashMap remove.
-            rooms.remove(&code);
-            send_close_signal(&mut socket, CLOSE_CODE_MISSING, "").await;
-            return;
+        // Mobile-resume joins bypass the brute-force counter (real-device
+        // testing: picker/screen-lock cycles burned the room mid-transfer
+        // after ~3 resumes) but are bounded by their own generous cap.
+        if is_resume_join(attempt_before, entry.tx.receiver_count()) {
+            entry.resumes += 1;
+            if entry.resumes > MAX_RESUME_JOINS {
+                drop(entry); // release the write lock before the DashMap remove.
+                rooms.remove(&code);
+                send_close_signal(&mut socket, CLOSE_CODE_MISSING, "").await;
+                return;
+            }
+        } else {
+            entry.attempts += 1;
+            if entry.attempts >= MAX_CODE_ATTEMPTS {
+                drop(entry); // release the write lock before the DashMap remove.
+                rooms.remove(&code);
+                send_close_signal(&mut socket, CLOSE_CODE_MISSING, "").await;
+                return;
+            }
         }
         // attempts 0→1 = sender, 1→2 = receiver: legitimate pair members.
         // attempts 2+ are either observers (attackers) OR reconnects after a mobile
@@ -610,10 +729,19 @@ async fn pair(mut socket: WebSocket, code: String, rooms: Rooms, session_secs: u
         // or ≥ 2 and stays marked as observer.
         let tx = entry.tx.clone();
         let is_pair_member = attempt_before < 2 || tx.receiver_count() == 1;
-        (tx, is_pair_member)
+        // 23.7 A pair member joining while exactly one subscriber holds the slot
+        // open is a resume (return from a mobile background event) — the survivor
+        // may be showing the grace banner and needs a "peer is back" signal.
+        let was_resume = attempt_before >= 2 && tx.receiver_count() == 1;
+        (tx, is_pair_member, was_resume)
     };
     let mut rx = tx.subscribe();
     let my_id = NEXT_ID.fetch_add(1, Ordering::Relaxed);
+
+    if was_resume {
+        // 23.7 Clears the survivor's "waiting up to 30 s" banner.
+        let _ = tx.send((my_id, Message::Text("BEEM-BACK".into())));
+    }
 
     // 12.3 Max session duration.
     let deadline = tokio::time::Instant::now() + Duration::from_secs(session_secs);
@@ -708,6 +836,10 @@ async fn pair(mut socket: WebSocket, code: String, rooms: Rooms, session_secs: u
         if let Some(mut r) = rooms.get_mut(&code) {
             r.expires_at = Instant::now() + Duration::from_secs(RESUME_GRACE_SECS + 10);
         }
+        // 23.7 Honest wait: tell the survivor the peer went silent and the grace
+        // clock is running (cosmetic banner — old clients ignore unknown Text
+        // markers, and it never changes session state on either side).
+        let _ = tx.send((my_id, Message::Text(format!("BEEM-GRACE:{}", RESUME_GRACE_SECS))));
         let tx_grace = tx.clone();
         tokio::spawn(async move {
             tokio::time::sleep(Duration::from_secs(RESUME_GRACE_SECS)).await;
@@ -725,6 +857,27 @@ async fn pair(mut socket: WebSocket, code: String, rooms: Rooms, session_secs: u
 mod tests {
     use super::*;
     use std::net::Ipv4Addr;
+
+    // TEST-S-017 — TURN REST credential matches coturn's use-auth-secret format.
+    // Reference vector computed independently (Python hmac): base64(HMAC-SHA1(
+    // "testsecret", "1700000000")). now_unix chosen so expiry = now + TTL = 1700000000.
+    #[test]
+    fn test_turn_credential_vector() {
+        let now = 1700000000 - TURN_CRED_TTL_SECS;
+        let (username, credential) = turn_credential(b"testsecret", now);
+        assert_eq!(username, "1700000000", "username must be the unix expiry");
+        assert_eq!(credential, "n4KuwizbZtngI4DON7Ws71orzs4=", "coturn REST HMAC format");
+    }
+
+    // TEST-S-018 — expiry is in the future and username parses as its timestamp.
+    #[test]
+    fn test_turn_credential_expiry_future() {
+        let now = now_unix();
+        let (username, _) = turn_credential(b"anything", now);
+        let expiry: u64 = username.parse().expect("username is a unix timestamp");
+        assert!(expiry > now, "expiry must be ahead of now");
+        assert_eq!(expiry - now, TURN_CRED_TTL_SECS, "TTL exactly applied");
+    }
 
     // TEST-S-001 — Code format validation
     #[test]
@@ -880,7 +1033,7 @@ mod tests {
         let (tx, _) = broadcast::channel(256);
         rooms.insert(
             code.clone(),
-            Room { tx, expires_at: Instant::now() + Duration::from_secs(60), attempts: 0 },
+            Room { tx, expires_at: Instant::now() + Duration::from_secs(60), attempts: 0, resumes: 0 },
         );
 
         // First MAX_CODE_ATTEMPTS-1 increments — room survives.
@@ -906,11 +1059,62 @@ mod tests {
     fn test_room_ttl_expiry() {
         let now = Instant::now();
         let (tx, _) = broadcast::channel::<(u64, Message)>(1);
-        let expired = Room { tx: tx.clone(), expires_at: now - Duration::from_secs(1), attempts: 0 };
-        let fresh   = Room { tx,             expires_at: now + Duration::from_secs(1), attempts: 0 };
+        let expired = Room { tx: tx.clone(), expires_at: now - Duration::from_secs(1), attempts: 0, resumes: 0 };
+        let fresh   = Room { tx,             expires_at: now + Duration::from_secs(1), attempts: 0, resumes: 0 };
 
         assert!(!(expired.expires_at > now), "expired room should be pruned");
         assert!(fresh.expires_at > now,      "fresh room should be kept");
+    }
+
+    // TEST-S-009b — sweeper must not GC a paired room with live WS subscribers
+    // past its TTL, but must still hard-expire unpaired rooms so join codes
+    // don't outlive their 60s window.
+    #[test]
+    fn test_sweeper_keeps_paired_expired_room_with_subscribers() {
+        let rooms: Rooms = Arc::new(DashMap::new());
+        let rate_limits: RateLimits = Arc::new(DashMap::new());
+        let concurrent: Concurrent = Arc::new(DashMap::new());
+        let now = Instant::now();
+
+        // 1. Expired, paired (attempts >= 2), receiver still alive → KEPT.
+        let (tx_paired, rx_paired) = broadcast::channel::<(u64, Message)>(1);
+        rooms.insert(
+            "paired-live".to_string(),
+            Room { tx: tx_paired, expires_at: now - Duration::from_secs(1), attempts: 2, resumes: 0 },
+        );
+
+        // 2. Expired, paired, zero receivers (dropped immediately) → PRUNED.
+        let (tx_paired_dead, rx_paired_dead) = broadcast::channel::<(u64, Message)>(1);
+        drop(rx_paired_dead);
+        rooms.insert(
+            "paired-dead".to_string(),
+            Room { tx: tx_paired_dead, expires_at: now - Duration::from_secs(1), attempts: 2, resumes: 0 },
+        );
+
+        // 3. Expired, unpaired (attempts < 2), even with a live receiver → PRUNED.
+        let (tx_unpaired, rx_unpaired) = broadcast::channel::<(u64, Message)>(1);
+        rooms.insert(
+            "unpaired-live".to_string(),
+            Room { tx: tx_unpaired, expires_at: now - Duration::from_secs(1), attempts: 1, resumes: 0 },
+        );
+
+        // 4. Fresh (unexpired) room → KEPT regardless of attempts/receivers.
+        let (tx_fresh, _) = broadcast::channel::<(u64, Message)>(1);
+        rooms.insert(
+            "fresh".to_string(),
+            Room { tx: tx_fresh, expires_at: now + Duration::from_secs(60), attempts: 0, resumes: 0 },
+        );
+
+        sweep_maps(&rooms, &rate_limits, &concurrent, now);
+
+        assert!(rooms.get("paired-live").is_some(),   "paired room with live subscriber must survive expiry");
+        assert!(rooms.get("paired-dead").is_none(),   "paired room with zero subscribers must be pruned");
+        assert!(rooms.get("unpaired-live").is_none(), "unpaired room must hard-expire even with a live subscriber");
+        assert!(rooms.get("fresh").is_some(),         "unexpired room must always survive");
+
+        // Keep receivers alive through the assertions above so receiver_count() > 0 held.
+        drop(rx_paired);
+        drop(rx_unpaired);
     }
 
     // TEST-S-010 — ip_fingerprint is deterministic and not PII
@@ -977,5 +1181,51 @@ mod tests {
         assert!(!is_leave_marker("beem-leave"));
         assert!(!is_leave_marker(""));
         assert!(!is_leave_marker("BEEM-LEAVEX"));
+    }
+
+    // TEST-S-015 — mobile-resume joins must not spend the brute-force budget
+    // (~3 picker cycles can burn the room mid-transfer).
+    #[test]
+    fn test_is_resume_join() {
+        // Pairing itself is never a resume.
+        assert!(!is_resume_join(0, 0)); // sender joins fresh room
+        assert!(!is_resume_join(1, 1)); // receiver joins, sender waiting
+        // Post-pairing rejoin with one survivor = the classic picker resume.
+        assert!(is_resume_join(2, 1));
+        assert!(is_resume_join(4, 1)); // later resumes in a long session
+        // Both sides backgrounded at once (phone↔phone) — still a resume.
+        assert!(is_resume_join(2, 0));
+        // Attacker probing an ACTIVE session: room is full → counted path.
+        assert!(!is_resume_join(2, 2));
+        assert!(!is_resume_join(3, 2));
+    }
+
+    // TEST-S-016 — a long session's resume cycles never reach the burn line,
+    // while attacker-style joins still do. Simulates the counting logic of
+    // pair() against the field scenario (pair + many picker cycles).
+    #[test]
+    fn test_resume_cycles_do_not_burn_room() {
+        let mut attempts: u32 = 0;
+        let mut resumes: u32 = 0;
+        // Legitimate pairing: sender then receiver — counted.
+        for receiver_count in [0usize, 1] {
+            assert!(!is_resume_join(attempts, receiver_count));
+            attempts += 1;
+        }
+        // 20 file-picker / screen-lock cycles: survivor holds the slot open.
+        for _ in 0..20 {
+            assert!(is_resume_join(attempts, 1), "resume misclassified");
+            resumes += 1;
+            assert!(resumes <= MAX_RESUME_JOINS, "resume cap hit too early");
+        }
+        // attempts never moved past the pair — room alive.
+        assert!(attempts < MAX_CODE_ATTEMPTS);
+        // Attacker joins during an ACTIVE session (2 subscribers): counted,
+        // and the 5th total attempt burns the room as before.
+        for _ in 0..3 {
+            assert!(!is_resume_join(attempts, 2));
+            attempts += 1;
+        }
+        assert!(attempts >= MAX_CODE_ATTEMPTS, "brute-force cap lost its teeth");
     }
 }

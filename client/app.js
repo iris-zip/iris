@@ -1,7 +1,7 @@
 // 15.4 SRI — placeholders rewritten by scripts/build-sri.sh on release build.
 // Until rewritten, runtime check short-circuits with a dev-mode warning.
-const CRYPTO_JS_SRI   = "sha384-osLYyVEt1lMfPw0Du9COhIM5xpR5Cy6ghrclWm++dvom3G5NKDtA5ClZ5GOXIF/x";
-const CRYPTO_WASM_SRI = "sha384-Mc4lw7tppkvLqGl9bZvDi/n3F4AHU0dd8FVcXReIgtfG2X09BXEgxOmfMBHGkn3O";
+const CRYPTO_JS_SRI   = "sha384-ZjzAD+YebCuGOe7gHZquNblaaBfiILnBvgvSR/+J5tCP3ZdV1h8dwYbXnG1m10Ga";
+const CRYPTO_WASM_SRI = "sha384-BV/Jl8gs64GtFz2v8xd/itc+0yPNvoJrWp5QIO0lhnK4WpVqW+zXKXUl7L/4fhxV";
 const SRI_PLACEHOLDER_PREFIX = "__SRI_";
 
 async function sha384Base64(buf) {
@@ -86,6 +86,7 @@ const {
     x25519_keypair, x25519_shared,
     mlkem_keygen, mlkem_encaps, mlkem_decaps,
     hkdf_combine,
+    Sha256Stream,
 } = cryptoMod;
 
 const views = {
@@ -189,12 +190,6 @@ function setWaitMsg(text, tone) {
     if (dot) dot.classList.toggle("bm-status-dot--waiting", tone === "warn");
     const label = chip.querySelector(".bm-wait-label");
     if (label) label.textContent = text;
-}
-
-async function fileChecksum(bytes) {
-    const digest = await crypto.subtle.digest("SHA-256", bytes);
-    return Array.from(new Uint8Array(digest))
-        .map(b => b.toString(16).padStart(2, "0")).join("");
 }
 
 function bytesEq(a, b) {
@@ -306,8 +301,13 @@ let useRTC = false;
 // rebuilds the peer connection with a fresh offer over WS signalling; active
 // chunk loops park on waitDcSettled() instead of silently downgrading to the
 // WS relay. Counters are NOT reset — same AEAD key, nonces must stay unique.
-const DC_RECONNECT_TRIES = 3;
-const DC_RECONNECT_OPEN_MS = 5000;
+// Post-mobile-freeze the DC rebuild almost always fails (the frozen peer offers
+// no fresh relay candidate — coturn-confirmed), and the passive answerer waits
+// TRIES*OPEN_MS+2000 before falling back to the working WS relay. Kept short so
+// a stalled transfer resumes on relay in ~8 s, not ~17 s; a genuine LAN blip
+// still gets two 3 s open windows to rebuild the direct path.
+const DC_RECONNECT_TRIES = 2;
+const DC_RECONNECT_OPEN_MS = 3000;
 let dcReconnecting = false;
 let dcWaiters = [];
 
@@ -426,20 +426,6 @@ $("code-input").addEventListener("input", () => {
     if ($("code-input").value.length === 6) joinAsReceiver();
 });
 
-// 23.6: deep-link join from a scanned QR (#<code>). Runs after crypto init above,
-// so joinAsReceiver() below actually works. Strip the hash immediately via
-// replaceState — fragments never reach the server, but the code shouldn't
-// linger in the address bar or browser history either.
-const hashMatch = location.hash.match(/^#(\d{6})$/);
-if (hashMatch) {
-    history.replaceState(null, "", location.pathname + location.search);
-    $("receiver-error").textContent = "";
-    clearRateBanners();
-    show("receiver");
-    $("code-input").value = hashMatch[1];
-    $("code-input").dispatchEvent(new Event("input")); // reuses the existing auto-submit-at-6-digits path
-}
-
 $("btn-chat-send").addEventListener("click", sendChat);
 $("chat-input").addEventListener("keydown", (e) => {
     if (e.key === "Enter" && !e.shiftKey) {
@@ -473,9 +459,11 @@ if (copyBtn) {
 $("btn-file-pick").addEventListener("click", () => $("file-input").click());
 $("file-input").addEventListener("change", (e) => {
     const f = e.target.files && e.target.files[0];
-    if (f) sendFile(f);
+    if (f) offerFile(f);
     e.target.value = "";
 });
+
+$("img-stage-remove").addEventListener("click", clearStagedImage); // 23.8
 
 // Clipboard paste — intercept only when clipboard contains a file (screenshot, copied file).
 // Text pastes fall through untouched to the textarea.
@@ -486,7 +474,7 @@ document.addEventListener("paste", (e) => {
     for (const item of items) {
         if (item.kind === "file") {
             const file = item.getAsFile();
-            if (file) { e.preventDefault(); sendFile(file); return; }
+            if (file) { e.preventDefault(); offerFile(file); return; }
         }
     }
 });
@@ -503,7 +491,7 @@ $("drop-overlay").addEventListener("drop", (e) => {
     e.preventDefault();
     $("drop-overlay").hidden = true;
     const file = e.dataTransfer.files[0];
-    if (file) sendFile(file);
+    if (file) offerFile(file);
 });
 
 async function startSender() {
@@ -638,6 +626,14 @@ function openWs(code, resume = false) {
             if (m) {
                 preCloseCode = parseInt(m[1], 10);
                 preCloseReason = m[2];
+                return;
+            }
+            // 23.7 Peer-presence hints from the relay — chip text only, never state.
+            const g = e.data.match(/^BEEM-GRACE:(\d+)$/);
+            if (g && step === "chat") {
+                setChatChip("warn", `Peer connection lost — waiting up to ${g[1]} s…`);
+            } else if (e.data === "BEEM-BACK" && step === "chat") {
+                setChatChip("ok", "Connected");
             }
             return;
         }
@@ -887,7 +883,12 @@ document.addEventListener("visibilitychange", async () => {
     if (document.visibilityState !== "visible" || step !== "chat") return;
     if (wakeLock === null) await acquireWakeLock();
     // WS dies silently while screen is off — detect and reconnect immediately on unlock
-    if (!ws || ws.readyState !== WebSocket.OPEN) attemptResume();
+    if (!ws || ws.readyState !== WebSocket.OPEN) {
+        // Foreground return: background retries already climbed the backoff
+        // ladder — reconnect now instead of serving a stale 12 s delay.
+        resumeAttempt = 0;
+        attemptResume();
+    }
 });
 
 // Update the chat-header status chip without rewriting its DOM structure.
@@ -941,12 +942,14 @@ function endChatSession() {
     useRTC = false;
     drainAckWaiters(); // unblock any sendFile/handleFileNack loop waiting on ACK
     settleDcReconnect(); // abandon any in-flight DC rebuild + wake parked loops (16.9.1)
+    clearRecvStall(); // 21.4 — no watchdog may outlive the session
     stopWsKeepalive();
     releaseWakeLock();
     closeAllDcPaths();
     zeroizeKeys(); // session over (peer left / timeout) — wipe keys
     previewUrls.forEach(u => URL.revokeObjectURL(u)); // 23.3
     previewUrls = [];
+    clearStagedImage(); // 23.8 — never leave an unsent image behind
     for (const id of ["chat-input", "btn-chat-send", "btn-file-pick"]) {
         const el = $(id);
         if (el) el.disabled = true;
@@ -976,6 +979,7 @@ function _doVanish() {
     useRTC = false;
     drainAckWaiters();
     settleDcReconnect(); // 16.9.1: abandon any DC rebuild + wake parked loops
+    clearRecvStall(); // 21.4 — no watchdog may outlive the session
     stopWsKeepalive();
     releaseWakeLock();
     // 23.4: plaintext marker so the server can skip resume-grace and tear the
@@ -990,6 +994,7 @@ function _doVanish() {
     zeroizeKeys(); // panic vanish — overwrite then drop all key material
     previewUrls.forEach(u => URL.revokeObjectURL(u)); // 23.3
     previewUrls = [];
+    clearStagedImage(); // 23.8 — never leave an unsent image behind
     pakeState = null;
     sendCounterWS = 0n;
     recvCounterWS = -1n;
@@ -1120,7 +1125,16 @@ const DC_BUFFER_CAP = 2 * 1024 * 1024;
 const DC_STALL_MS = 5000;
 function dcPathStalled(p, now) {
     const b = p.dc.bufferedAmount;
-    if (p.lastBuf === undefined || b < p.lastBuf) {
+    // b === 0 must reset the clock, not just a decrease: an idle path drains to
+    // 0 and then nobody calls pickDcPath() again for as long as the session is
+    // quiet, so lastDrain goes stale. Without this, the FIRST send after any
+    // idle gap > DC_STALL_MS is misread as a stall on the very next pick — the
+    // path is closed on sight with that just-written frame still queued and the
+    // frame is destroyed. Bit 21.4's NACK retransmit (written, then END picks a
+    // path 5 ms later, then close) but it was always latent for any send that
+    // follows a quiet stretch. An empty buffer has nothing to drain, so it can
+    // never be "stalled" — only sustained b > 0 with no drain means a dead route.
+    if (p.lastBuf === undefined || b < p.lastBuf || b === 0) {
         p.lastBuf = b;
         p.lastDrain = now;
         return false;
@@ -1235,6 +1249,13 @@ function handleDcPathClose(path) {
 }
 async function rebuildRTC() {
     for (let i = 0; i < DC_RECONNECT_TRIES && step === "chat"; i++) {
+        // Offers travel over WS signalling — a try during a WS outage is a
+        // guaranteed no-op (sendSignal drops on closed WS). Wait, bounded, for
+        // the resumed socket before spending the attempt.
+        const wsDeadline = Date.now() + RESUME_GRACE_MS + 5000;
+        while (step === "chat" && (!ws || ws.readyState !== WebSocket.OPEN) && Date.now() < wsDeadline) {
+            await new Promise(r => setTimeout(r, 250));
+        }
         closeAllDcPaths();
         setupWebRTC(); // fresh paths + offers over WS signalling
         const deadline = Date.now() + DC_RECONNECT_OPEN_MS;
@@ -1364,9 +1385,13 @@ async function flushPendingIce(path) {
 
 function sendPayload(type, plaintext) {
     if (step !== "chat") return false;
-    // File frames stripe across open DC paths (16.9.2, least-buffered first);
-    // signaling + chat always via WS.
-    const wantsDC = type === T_FILE_HDR || type === T_FILE_CHK || type === T_FILE_END;
+    // Chunk frames stripe across open DC paths (16.9.2, least-buffered first);
+    // signaling + chat always via WS. HDR/END are WS-only too: a zombie DC
+    // (carrier reset under a frozen tab) eats them silently and the receiver
+    // then has no transfer slot to ACK relayed chunks into — sender deadlocks
+    // at the ACK window (field, 2026-07-24). earlyChunks replay (16.9.2)
+    // covers chunks beating the WS header across a faster path.
+    const wantsDC = type === T_FILE_CHK;
     const path = wantsDC && useRTC ? pickDcPath() : null;
     if (!path && (!ws || ws.readyState !== WebSocket.OPEN)) return false;
     const nonce = path ? makeNonce(sendCountersDC[path.id], 1 + path.id)
@@ -1392,7 +1417,75 @@ function sendPayload(type, plaintext) {
     return true;
 }
 
+// HDR/END delivery: parks on the mobile-resume machinery like the chunk loop —
+// a WS blip mid-send reopens within the grace window and the frame goes out then.
+async function sendCtrlFrame(type, payload) {
+    if (sendPayload(type, payload)) return true;
+    const retryUntil = Date.now() + RESUME_GRACE_MS + 5000;
+    while (!sendCancelled && step === "chat" && Date.now() < retryUntil) {
+        await new Promise(r => setTimeout(r, 250));
+        if (sendPayload(type, payload)) return true;
+    }
+    return false;
+}
+
+// 23.8 — images are staged for confirmation instead of being sent on sight: an
+// accidental Ctrl+V used to transmit a screenshot with no undo. Non-image files
+// keep the send-on-pick behaviour. Display-only; the transfer path is unchanged.
+let stagedImage = null;
+let stagedImageUrl = null;
+
+function isImageFile(file) {
+    if (imageMimeFor(file.name)) return true;
+    return !!(file.type && file.type.startsWith("image/"));
+}
+
+function stageImage(file) {
+    if (step !== "chat") return;
+    clearStagedImage(); // a second paste replaces the first, never stacks
+    stagedImage = file;
+    $("img-stage-name").textContent = file.name || "image";
+    $("img-stage-size").textContent = fmtBytes(file.size);
+    const thumb = $("img-stage-thumb");
+    // Oversized images still stage (so the confirm step is consistent for every
+    // image) but show no thumbnail — same 10 MB ceiling as the in-chat preview.
+    if (file.size <= MAX_PREVIEW_SIZE) {
+        stagedImageUrl = URL.createObjectURL(file);
+        thumb.src = stagedImageUrl;
+        thumb.hidden = false;
+    }
+    $("img-stage").hidden = false;
+    $("chat-input").focus();
+}
+
+function clearStagedImage() {
+    stagedImage = null;
+    if (stagedImageUrl) {
+        URL.revokeObjectURL(stagedImageUrl);
+        stagedImageUrl = null;
+    }
+    const thumb = $("img-stage-thumb");
+    thumb.removeAttribute("src");
+    thumb.hidden = true;
+    $("img-stage").hidden = true;
+}
+
+// Routes a picked/pasted/dropped file: images wait for confirmation, everything
+// else sends immediately as before.
+function offerFile(file) {
+    if (isImageFile(file)) stageImage(file);
+    else sendFile(file);
+}
+
 function sendChat() {
+    // A staged image takes priority over the text box; any typed text is left
+    // untouched so it can be sent as its own message afterwards.
+    if (stagedImage) {
+        const file = stagedImage;
+        clearStagedImage();
+        sendFile(file);
+        return;
+    }
     const text = $("chat-input").value;
     if (!text) return;
     if (sendPayload(T_TEXT, textEnc.encode(text))) {
@@ -1422,6 +1515,19 @@ function handleChatPayload(type, pt) {
     appendSystemMsg(`(unknown frame type 0x${type.toString(16)})`);
 }
 
+// 23.9 — inline SVGs for the per-message copy button (same clipboard glyph as the
+// pairing-code copy button, plus a check for the copied state). Static strings, no
+// user data, so innerHTML is safe here.
+const COPY_ICON_SVG =
+    '<svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" ' +
+    'stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">' +
+    '<rect x="9" y="9" width="13" height="13" rx="2" ry="2"/>' +
+    '<path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/></svg>';
+const CHECK_ICON_SVG =
+    '<svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" ' +
+    'stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">' +
+    '<polyline points="20 6 9 17 4 12"/></svg>';
+
 function appendChatMsg(direction, text) {
     const wrap = document.createElement("div");
     wrap.className = `bm-msg bm-msg--${direction}`;
@@ -1444,13 +1550,15 @@ function appendChatMsg(direction, text) {
         });
         actions.appendChild(toggle);
     }
-    // 23.2 — per-message copy button; hidden when Clipboard API is unavailable
+    // 23.2 — per-message copy button; hidden when Clipboard API is unavailable.
+    // 23.9 — icon instead of "Copy" text: quiet clipboard glyph, green check on copy.
     if (navigator.clipboard && navigator.clipboard.writeText) {
         const copyBtn = document.createElement("button");
         copyBtn.type = "button";
         copyBtn.className = "bm-msg-copy";
         copyBtn.setAttribute("aria-label", "Copy message");
-        copyBtn.textContent = "Copy";
+        copyBtn.title = "Copy";
+        copyBtn.innerHTML = COPY_ICON_SVG;
         let copyTimer = null;
         copyBtn.addEventListener("click", async () => {
             try {
@@ -1460,10 +1568,12 @@ function appendChatMsg(direction, text) {
             }
             clearTimeout(copyTimer);
             copyBtn.classList.add("bm-msg-copy--copied");
-            copyBtn.textContent = "Copied";
+            copyBtn.innerHTML = CHECK_ICON_SVG;
+            copyBtn.title = "Copied";
             copyTimer = setTimeout(() => {
                 copyBtn.classList.remove("bm-msg-copy--copied");
-                copyBtn.textContent = "Copy";
+                copyBtn.innerHTML = COPY_ICON_SVG;
+                copyBtn.title = "Copy";
             }, 2000);
         });
         actions.appendChild(copyBtn);
@@ -1610,10 +1720,13 @@ async function sendFile(file) {
     hv.setBigUint64(1, BigInt(file.size), false);
     hv.setUint16(9, nameBytes.length, false);
     hdr.set(nameBytes, 11);
-    if (!sendPayload(T_FILE_HDR, hdr)) { endSendGuard(); return; }
-
     sendCancelled = false;
     sendCancelMsg = "";
+    if (!await sendCtrlFrame(T_FILE_HDR, hdr)) {
+        $("file-status").textContent = "Connection lost — file not sent. Try again.";
+        endSendGuard();
+        return;
+    }
     pendingDelivery = null; // a new transfer supersedes the previous confirmation
     const refs = appendFileRow(file.name, file.size, "out", () => {
         if (sendCancelled) return;
@@ -1641,18 +1754,26 @@ async function sendFile(file) {
     let sentBytes = 0;
     // Sliding 1-second window: array of [timestamp, bytes] samples
     let speedSamples = [];
+    // 21.2 — streaming checksum: each chunk hashed once as it's read, no
+    // second full-file buffer/read needed at the end.
+    const hasher = new Sha256Stream();
 
     for (let i = 0; i < totalChunks; i++) {
         if (sendCancelled) break;
         // 16.9.1: DC dropped mid-transfer — park until the rebuild settles
         // (reopened → resume via DC; gave up → chunks route via WS below).
         if (dcReconnecting) {
+            // The bar would otherwise sit frozen at the last byte and read as a
+            // dead transfer — tell the user it's recovering so they don't cancel.
+            updateFileRow(refs, Math.max(0, sentBytes - dcBufferedTotal()), file.size,
+                          "Reconnecting — resumes automatically", 0);
             await waitDcSettled();
             if (sendCancelled) break;
         }
         const offset = i * CHUNK_SIZE;
         const slice = file.slice(offset, Math.min(file.size, offset + CHUNK_SIZE));
         const buf = new Uint8Array(await slice.arrayBuffer());
+        hasher.update(buf); // 21.2 — hash in-flight, index order, once per chunk
         const payload = new Uint8Array(1 + 4 + buf.length);
         payload[0] = tid;
         new DataView(payload.buffer).setUint32(1, i, false);
@@ -1709,13 +1830,17 @@ async function sendFile(file) {
     }
     lastSentFile = file; // held so handleFileNack can re-read slices on retransmit request
     lastSentTid = tid;
-    sendPayload(T_FILE_END, new Uint8Array([tid]));
+    // Not awaited: a dead WS would park the retry for its full window and hold
+    // the row on "Sending" with every chunk already gone. The receiver's 21.4
+    // watchdog backstops an END that never lands.
+    sendCtrlFrame(T_FILE_END, new Uint8Array([tid])).catch(() => {});
     endSendGuard(); // re-enable on "Sent" — NACK rounds for this transfer stay valid via lastSentTid
     removeCancelBtn(refs);
     updateFileRow(refs, file.size, file.size, "Sent", 0);
     pendingDelivery = { refs, size: file.size }; // green "Delivered" only on T_FILE_DONE
     try {
-        const cs = await fileChecksum(await file.arrayBuffer());
+        // 21.2 — streamed digest from the chunk loop, not a second full-file read.
+        const cs = hasher.finalize_hex();
         appendSystemMsg(`SHA-256: ${cs}`);
     } catch (_) {}
 }
@@ -1766,6 +1891,39 @@ let dropStrayChunks = false; // after an incoming cancel, late in-flight chunks 
 let earlyChunks = [];
 let earlyEndTid = -1; // tid of an END that beat its header across paths (-1 = none)
 const EARLY_CHUNK_CAP = 256; // 32 MB of path skew — far beyond any real race
+// 21.4 — END-frame loss watchdog. T_FILE_END rides a DC path like any file
+// frame (sendPayload return ignored at the send site), and a stalled path
+// closed with END still queued in its buffer (pickDcPath / dcBackpressure /
+// dcDrainBuffers all close-on-sight) loses it silently. The NACK repair round
+// only ever ran from handleFileEnd, so a lost END left the receiver sitting
+// incomplete forever and the sender on "Sent" — the only other END source is
+// handleFileNack's tail, which needs a NACK, which needed the END: circular.
+// This timer notices "transfer open + no accepted chunk for RECV_STALL_MS"
+// and walks into handleFileEnd on its own initiative; the 16.9.5 END grace,
+// NACK rounds and the nackAttempts cap then behave exactly as if the END had
+// arrived, so a dead sender still terminates at honest "Incomplete".
+// 60 s sits clear of every legitimate zero-chunk gap: the 1 s END grace, the
+// 5 s DC_STALL_MS, the 3×5 s + 2 s DC rebuild park (16.9.1), and the 30 s
+// server resume grace + 5 s WS chunk-retry slack — worst chained case
+// (rebuild fails, then a WS blip rides out the full retry window) ≈ 52 s.
+const RECV_STALL_MS = 60_000;
+let recvStallTimer = null;
+
+function clearRecvStall() {
+    if (recvStallTimer !== null) { clearTimeout(recvStallTimer); recvStallTimer = null; }
+}
+
+function armRecvStall() {
+    clearRecvStall();
+    const f = recvFile;
+    if (!f) return;
+    recvStallTimer = setTimeout(() => {
+        recvStallTimer = null;
+        if (step !== "chat" || recvFile !== f) return; // torn down or superseded (16.9.6)
+        handleFileEnd(new Uint8Array([f.tid])); // body is await-free — recvFile is settled on return
+        if (recvFile === f) armRecvStall(); // grace/NACK round still open — keep watching
+    }, RECV_STALL_MS);
+}
 
 function handleFileHdr(pt) {
     if (pt.length < 11) { appendSystemMsg("(bad file header)"); return; }
@@ -1774,6 +1932,15 @@ function handleFileHdr(pt) {
     const size = Number(v.getBigUint64(1, false));
     const nameLen = v.getUint16(9, false);
     if (pt.length !== 11 + nameLen) { appendSystemMsg("(bad file header)"); return; }
+    // 21.1: never trust the sender's declared size — a modified client could
+    // announce anything and OOM this tab during assembly. Mirror of the
+    // sender-side pick check; honest senders can't hit this branch.
+    if (size > MAX_FILE_SIZE) {
+        appendSystemMsg(`(oversized file rejected · declared ${fmtBytes(size)})`);
+        dropStrayChunks = true; // its chunks are already in flight — ignore them
+        sendPayload(T_FILE_CANCEL, new Uint8Array([0x01]));
+        return;
+    }
     const name = textDec.decode(pt.slice(11, 11 + nameLen));
     // 16.9.6: single recvFile slot — a new header supersedes the old transfer
     // EXPLICITLY (it used to be silently destroyed) and the tid checks below
@@ -1788,6 +1955,7 @@ function handleFileHdr(pt) {
         if (!recvFile || recvFile.refs !== refs) return; // stale button (already terminal)
         const f = recvFile;
         recvFile = null;
+        clearRecvStall(); // 21.4
         dropStrayChunks = true; // chunks already in flight will keep landing — expected
         earlyChunks = [];
         earlyEndTid = -1;
@@ -1803,6 +1971,7 @@ function handleFileHdr(pt) {
     const endWasEarly = earlyEndTid === tid;
     earlyEndTid = -1;
     if (endWasEarly) handleFileEnd(new Uint8Array([tid]));
+    armRecvStall(); // 21.4 — no-ops if the early END above already finished the transfer
 }
 
 function handleFileChunk(pt) {
@@ -1823,6 +1992,9 @@ function handleFileChunk(pt) {
         return;
     }
     const idx = new DataView(pt.buffer, pt.byteOffset, pt.byteLength).getUint32(1, false);
+    // 21.1: out-of-range index from a hostile sender — sparse parts[] would
+    // balloon to idx entries on assembly. No ACK: honest senders never send one.
+    if (idx >= recvFile.totalChunks) return;
     const data = pt.slice(5);
     if (recvFile.parts[idx] !== undefined) {
         // Duplicate (a retransmit raced the late original). Still ACK it: the sender
@@ -1842,6 +2014,7 @@ function handleFileChunk(pt) {
     recvFile.speedSamples = recvFile.speedSamples.filter(s => t - s[0] <= 1000);
     const bps = recvFile.speedSamples.reduce((a, s) => a + s[1], 0);
     updateFileRow(recvFile.refs, recvFile.received, recvFile.size, "Receiving", bps);
+    armRecvStall(); // 21.4 — every accepted chunk resets the END-loss watchdog
 }
 
 async function handleFileEnd(pt) {
@@ -1883,6 +2056,7 @@ async function handleFileEnd(pt) {
         }
     }
     recvFile = null;
+    clearRecvStall(); // 21.4 \u2014 transfer terminal either way below
     if (f.received !== f.size) {
         failFileRow(f.refs, `Incomplete \u00b7 ${fmtBytes(f.received)} / ${fmtBytes(f.size)}`);
         return;
@@ -1919,7 +2093,11 @@ async function handleFileEnd(pt) {
     f.refs.meta.appendChild(link);
 
     try {
-        const cs = await fileChecksum(await blob.arrayBuffer());
+        // 21.2 — streamed digest over the already-assembled parts, in index
+        // order, instead of re-reading the assembled blob whole.
+        const hasher = new Sha256Stream();
+        for (let i = 0; i < f.totalChunks; i++) hasher.update(f.parts[i]);
+        const cs = hasher.finalize_hex();
         appendSystemMsg(`SHA-256: ${cs}`);
     } catch (_) {}
 }
@@ -1943,6 +2121,7 @@ function handleFileCancel(pt) {
         if (!recvFile) { dropStrayChunks = true; return; }
         const f = recvFile;
         recvFile = null;
+        clearRecvStall(); // 21.4
         dropStrayChunks = true;
         failFileRow(f.refs, "Cancelled by peer");
         return;
@@ -1993,6 +2172,23 @@ async function handleFileNack(pt) {
         }
     }
     if (sendCancelled) return;
-    sendPayload(T_FILE_END, new Uint8Array([tid]));
+    sendCtrlFrame(T_FILE_END, new Uint8Array([tid])).catch(() => {});
 }
 
+
+// 23.6b: deep-link join from a scanned QR (#<code>). MUST stay at the very end
+// of the module: the join path reads `let` bindings declared throughout the
+// file (e.g. wsChunksInFlight), and running it mid-module hits the temporal
+// dead zone — the error is then swallowed by the event loop and the join
+// silently never happens (Android field bug). Strip the hash via replaceState
+// first — fragments never reach the server, but the code shouldn't linger in
+// the address bar or browser history either.
+const hashMatch = location.hash.match(/^#(\d{6})$/);
+if (hashMatch) {
+    history.replaceState(null, "", location.pathname + location.search);
+    $("receiver-error").textContent = "";
+    clearRateBanners();
+    show("receiver");
+    $("code-input").value = hashMatch[1];
+    joinAsReceiver();
+}

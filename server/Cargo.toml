@@ -13,3 +13,6 @@ dashmap = "6"
 serde = { version = "1", features = ["derive"] }
 rand = "0.8"
 http = "1"
+hmac = "0.12"
+sha1 = "0.10"
+base64 = "0.22"
