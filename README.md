@@ -109,12 +109,15 @@ See [`client/.well-known/security.txt`](./client/.well-known/security.txt) (cont
 
 ## Licenses
 
-- **`server/` and `crypto/`** — see the LICENSE files in this repository for this release's terms.
-- **`client/`** — [MIT](./LICENSE.client). The client is public-facing code; MIT signals we trust it to be forked and embedded.
+Iris is open source. Every part of it can be read, run, self-hosted, and modified for free — by individuals and by companies, at any scale.
+
+- **`client/`** — [MIT](./LICENSE.client). The code that runs in your browser. Fork it, embed it, ship it.
+- **`crypto/`** — [Apache-2.0](./LICENSE.crypto). The audited encryption core, with an express patent grant, so it can be reused in other projects — including proprietary ones.
+- **`server/`** — [AGPL-3.0](./LICENSE.server). Free to run, including inside a company. If you modify it and offer it to others over a network, AGPL section 13 requires you to publish your modified source. A **commercial license** that waives that obligation is available for proprietary or embedded use — see [`ENTERPRISE.md`](./ENTERPRISE.md) or contact admin@iriszip.com.
 
 ## Self-hosting
 
-Iris can be self-hosted, so you can run your own instance. There's more than one way to expose it to the internet; see [`SELFHOST.md`](./SELFHOST.md) for the Docker single-image path (`docker compose up --build`). Below is one specific option: fronting a self-hosted instance with a Cloudflare Tunnel.
+Iris is open source, so you can run your own instance. There's more than one way to expose it to the internet; see [`SELFHOST.md`](./SELFHOST.md) for the Docker single-image path (`docker compose up --build`). Below is one specific option: fronting a self-hosted instance with a Cloudflare Tunnel.
 
 ### Option: Cloudflare Tunnel
 

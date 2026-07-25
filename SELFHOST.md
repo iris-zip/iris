@@ -96,9 +96,19 @@ two devices need to re-pair.
 
 ## License
 
-Self-hosting Iris internally — for your own team, customers you serve
-directly, or personal use — is free under the license's use grant
-(see `LICENSE.server`). A commercial license is required only if you intend
-to run Iris as a public-facing hosted service offered to third parties as a
-substantially similar product. The `client/` code is separately MIT-licensed
-(see `LICENSE.client`). See `README.md` for the full license breakdown.
+Self-hosting Iris — for your own team, for customers you serve directly, or
+for personal use — is free. The server is AGPL-3.0 (`LICENSE.server`), the
+crypto module is Apache-2.0 (`LICENSE.crypto`), and the client is MIT
+(`LICENSE.client`). See `README.md` for the full breakdown.
+
+Two practical notes for self-hosters:
+
+- **If you run Iris unmodified, you have nothing extra to do.** The AGPL's
+  source-offer obligation is satisfied by the public repository.
+- **If you modify the server and let people outside your organisation use
+  it over the network,** AGPL section 13 requires you to offer those users
+  the corresponding source of your modified version. Publishing your fork,
+  or linking it from the page, is enough.
+
+A commercial license — which waives the copyleft obligation for proprietary
+or embedded use — is available; see `ENTERPRISE.md`.
