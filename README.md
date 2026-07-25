@@ -30,12 +30,31 @@ Open `http://127.0.0.1:8080` in two browser tabs (or tab + phone on the same LAN
 
 ## Usage
 
-1. On the first tab click **Send**. A 6-digit code appears.
-2. On the second tab click **Receive**, enter the code, hit **Join**.
+1. On the first tab click **Send**. A 6-digit code appears, alongside a QR code.
+2. On the second tab click **Receive**, enter the code, hit **Join** — or just scan the QR code with the other device's camera, which deep-links straight into the session and auto-joins with no typing.
 3. When both tabs show the chat view, the hybrid handshake finished successfully.
 4. Type text, or click **Send file…** to transfer a file (up to 1 GB).
 
 The 6-digit code is valid for 60 seconds; each code is single-use and pairs exactly two clients.
+
+Once in the chat view:
+
+- Images up to 10 MB render inline in the transcript on both sides, with a confirm step before sending.
+- Every message has a copy button.
+- Long messages collapse behind a fade with **See more** / **See less**.
+- If the peer's browser is backgrounded (phone screen off, app switch), the session shows an honest "peer is away" state and recovers automatically instead of dying.
+- When one side leaves, the other side's session vanishes immediately rather than waiting for a timeout.
+
+## Connection lanes
+
+WebRTC picks the best available path automatically; the UI labels which one you got. Fastest to slowest:
+
+1. **Direct LAN** — both devices on the same network.
+2. **P2P (internet)** — a direct hole-punched peer-to-peer path.
+3. **Relay (TURN)** — a TURN relay forwards packets when a direct path can't be established (common on mobile carriers behind CGNAT). The relay is Iris's own coturn server; clients authenticate to it with short-lived credentials (2-hour expiry) minted on demand. It forwards ciphertext only and cannot read anything.
+4. **WebSocket relay through the app server** — the fallback if WebRTC fails entirely. Also ciphertext only.
+
+Which lane you get affects speed, never confidentiality.
 
 ## How the security works
 
@@ -74,18 +93,32 @@ The full rationale lives in the project's internal design notes.
 - Response headers: HSTS, strict CSP, `X-Frame-Options: DENY`, `X-Content-Type-Options: nosniff`, `Referrer-Policy: no-referrer`.
 - Zero content, IP, or code in server logs.
 
+## Independent cryptographic security review
+
+The Iris cryptographic protocol was independently reviewed by the Scientific Cyber Security Association (SCSA), lead reviewer Prof. Dr. Maksim Iavich, certificate dated 19 July 2026.
+
+Scope reviewed: SPAKE2, X25519, ML-KEM-768, HKDF-SHA-256 hybrid key derivation and transcript binding, and ChaCha20-Poly1305 AEAD. Every security objective evaluated — authentication, confidentiality, integrity, forward secrecy, replay and reflection resistance, MITM resistance, unknown key-share resistance, transcript binding, hybrid key security, store-now-decrypt-later resistance, and post-quantum readiness — was assessed as achieved under the review's stated assumptions and adversarial model.
+
+The public executive-summary certificate is in-repo at [`client/certificate.pdf`](./client/certificate.pdf), and live at [iriszip.com/certificate.pdf](https://iriszip.com/certificate.pdf).
+
+The review covers the cryptographic protocol design only. It does not cover endpoint compromise, side channels, or weak RNG — the certificate says so explicitly.
+
 ## Reporting security issues
 
-Please do not open public GitHub issues for vulnerabilities. See [`client/.well-known/security.txt`](./client/.well-known/security.txt) for the contact details and disclosure timeline.
+See [`client/.well-known/security.txt`](./client/.well-known/security.txt) (contact: admin@iriszip.com) for details and disclosure timeline.
 
 ## Licenses
 
 - **`server/` and `crypto/`** — see the LICENSE files in this repository for this release's terms.
 - **`client/`** — [MIT](./LICENSE.client). The client is public-facing code; MIT signals we trust it to be forked and embedded.
 
-## Public deployment (Cloudflare Tunnel)
+## Self-hosting
 
-Iris is designed to run on a home machine while being reachable from the internet via [Cloudflare Tunnel](https://developers.cloudflare.com/cloudflare-one/connections/connect-networks/). This hides your home IP, terminates TLS on Cloudflare's edge, and gives you DDoS protection for free.
+Iris can be self-hosted, so you can run your own instance. There's more than one way to expose it to the internet; see [`SELFHOST.md`](./SELFHOST.md) for the Docker single-image path (`docker compose up --build`). Below is one specific option: fronting a self-hosted instance with a Cloudflare Tunnel.
+
+### Option: Cloudflare Tunnel
+
+A home or VPS machine can be made reachable from the internet via [Cloudflare Tunnel](https://developers.cloudflare.com/cloudflare-one/connections/connect-networks/) without opening an inbound port. This hides the origin IP, terminates TLS on Cloudflare's edge, and gives you DDoS protection for free. The `iris.example.com` hostname below is a placeholder — substitute your own domain.
 
 One-time setup (run these commands manually):
 
@@ -132,7 +165,6 @@ When testing, verify:
 
 ## Roadmap
 
-Iris is developed in numbered phases. Post-beta plans include:
+Iris is developed in numbered phases. Post-1.0 plans include:
 
-- Cloudflare Tunnel deployment (Phase 13) for public hosting with hidden home IP and free TLS.
 - SCSA QRNG entropy integration (Phase 14) so the 6-digit codes come from a verifiable quantum random-number generator, with OS CSPRNG as a fallback.
