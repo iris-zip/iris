@@ -1304,6 +1304,8 @@ function dcBufferedTotal() {
 // that moment destroyed the tail). Stalled paths are closed — their queued
 // chunks are lost, but the receiver's NACK round at T_FILE_END repairs that.
 // Returns on cancel or reconnect too; both leave nothing more to drain here.
+// refs may be null (NACK repair round): drain the buffers without touching a row
+// that already reads "Sent" — the bytes are the point, not the progress display.
 async function dcDrainBuffers(refs, sentBytes, totalBytes) {
     while (!sendCancelled && !dcReconnecting) {
         const now = Date.now();
@@ -1317,7 +1319,7 @@ async function dcDrainBuffers(refs, sentBytes, totalBytes) {
             buffered += p.dc.bufferedAmount;
         }
         if (buffered === 0) return;
-        updateFileRow(refs, Math.max(0, sentBytes - buffered), totalBytes, "Sending", 0);
+        if (refs) updateFileRow(refs, Math.max(0, sentBytes - buffered), totalBytes, "Sending", 0);
         await new Promise(r => setTimeout(r, 100));
     }
 }
@@ -1962,7 +1964,7 @@ function handleFileHdr(pt) {
         sendPayload(T_FILE_CANCEL, new Uint8Array([0x01])); // tell sender to stop
         failFileRow(f.refs, "Cancelled");
     });
-    recvFile = { tid, name, size, totalChunks: Math.max(1, Math.ceil(size / CHUNK_SIZE)), nackAttempts: 0, parts: [], received: 0, refs, speedSamples: [] };
+    recvFile = { tid, name, size, totalChunks: Math.max(1, Math.ceil(size / CHUNK_SIZE)), nackAttempts: 0, nackRounds: 0, receivedAtLastNack: -1, parts: [], received: 0, refs, speedSamples: [] };
     // Replay anything that beat this header across a faster path (16.9.2);
     // the tid check in handleFileChunk drops stashed frames from other transfers.
     const replay = earlyChunks;
@@ -2025,7 +2027,28 @@ async function handleFileEnd(pt) {
     }
     if (tid !== recvFile.tid) return; // stray END from a superseded transfer (16.9.6)
     const f = recvFile;
-    // 16.9.5 unordered DC: a tiny END routinely overtakes large fragmented
+    // Consecutive NACK rounds that moved zero bytes before the transfer is declared
+// dead, and a hard ceiling on total rounds so a pathological trickle still ends.
+const MAX_NACK_NO_PROGRESS = 3;
+const MAX_NACK_ROUNDS = 32;
+
+// END rides the fast WS lane while bulk chunks are still draining on the DC lane,
+// so "missing at END" scales with how much is still in flight — a constant is the
+// wrong shape. Field case: a 124-chunk repair round re-requested 70 chunks that
+// were simply still arriving, because 1 s drains ~8 MB and ~15.5 MB was outstanding.
+// Floor 1 s keeps the old behaviour for a small tail (and matches SCTP's own
+// rationale for a 1 s RTO floor: never mistake late for lost). Ceiling 8 s stays
+// clear of RECV_STALL_MS (60 s) and the DC rebuild park. No recent samples means
+// nothing is arriving — repair immediately rather than stalling on a dead path.
+function endGraceMs(f) {
+    const now = Date.now();
+    const bps = f.speedSamples.filter(s => now - s[0] <= 1000).reduce((a, s) => a + s[1], 0);
+    if (bps <= 0) return 1000;
+    const outstanding = Math.max(0, f.size - f.received);
+    return Math.max(1000, Math.min(8000, Math.ceil((outstanding / bps) * 1500)));
+}
+
+// 16.9.5 unordered DC: a tiny END routinely overtakes large fragmented
     // chunks still in flight on its path (unordered = deliver-on-assembly),
     // so "missing at END" usually means "still arriving". One short grace
     // before each NACK round keeps transfers from always ending in a spurious
@@ -2034,16 +2057,25 @@ async function handleFileEnd(pt) {
     // grace forever) and re-arms after each NACK so every round gets one.
     if (f.received !== f.size && step === "chat" && !f.endGraceSpent) {
         f.endGraceSpent = true;
-        setTimeout(() => { if (recvFile === f) handleFileEnd(pt); }, 1000);
+        setTimeout(() => { if (recvFile === f) handleFileEnd(pt); }, endGraceMs(f));
         return;
     }
-    if (f.received !== f.size && f.nackAttempts < 3 && step === "chat") {
+    if (f.received !== f.size && f.nackAttempts < MAX_NACK_NO_PROGRESS && f.nackRounds < MAX_NACK_ROUNDS && step === "chat") {
         const missing = [];
         for (let i = 0; i < f.totalChunks; i++) {
             if (f.parts[i] === undefined) missing.push(i);
         }
         if (missing.length > 0) {
-            f.nackAttempts++;
+            // Only a round that achieved nothing counts against the cap. While bytes
+            // are still landing the peer is alive and the repair is working, and
+            // discarding a live transfer on a raw round count throws away data that
+            // is in flight. A zero-progress round still counts, so a dead path
+            // terminates at honest "Incomplete"; nackRounds bounds a pathological
+            // trickle, and RECV_STALL_MS backstops total silence.
+            if (f.received > f.receivedAtLastNack) f.nackAttempts = 0;
+            else f.nackAttempts++;
+            f.receivedAtLastNack = f.received;
+            f.nackRounds++;
             f.endGraceSpent = false; // fresh grace for the retransmit round's END
             // Keep recvFile alive \u2014 retransmitted chunks + new T_FILE_END will arrive
             const nackBuf = new Uint8Array(1 + missing.length * 4);
@@ -2171,6 +2203,13 @@ async function handleFileNack(pt) {
             }
         }
     }
+    if (sendCancelled) return;
+    // The main send loop drains before its END; this round must too. dcBackpressure
+    // above only caps the queue, so without this the loop finishes with megabytes
+    // still buffered and END — which rides the fast WS lane — overtakes them. The
+    // receiver then re-requests chunks that were merely in flight, burning a repair
+    // round on a healthy transfer (field: 124-chunk round re-requested 70).
+    await dcDrainBuffers(null, 0, 0);
     if (sendCancelled) return;
     sendCtrlFrame(T_FILE_END, new Uint8Array([tid])).catch(() => {});
 }
