@@ -1235,7 +1235,7 @@ function handleDcPathClose(path) {
     if (useRTC) return; // 16.9.2 graceful degrade — surviving paths carry the transfer
     if (step !== "chat" || dcReconnecting) return; // teardown, or already rebuilding
     dcReconnecting = true;
-    appendSystemMsg("(direct connection lost — reconnecting…)");
+    appendSystemMsg("(peer connection lost — reconnecting…)");
     if (role === "sender") {
         rebuildRTC();
     } else {
@@ -1243,7 +1243,7 @@ function handleDcPathClose(path) {
         setTimeout(() => {
             if (!dcReconnecting) return;
             settleDcReconnect();
-            if (step === "chat") appendSystemMsg("(direct reconnect failed — using relay)");
+            if (step === "chat") appendSystemMsg("(reconnect failed — using server relay)");
         }, DC_RECONNECT_TRIES * DC_RECONNECT_OPEN_MS + 2000);
     }
 }
@@ -1265,7 +1265,7 @@ async function rebuildRTC() {
         if (openDcPaths().length > 0) { settleDcReconnect(); return; }
     }
     settleDcReconnect();
-    if (step === "chat") appendSystemMsg("(direct reconnect failed — using relay)");
+    if (step === "chat") appendSystemMsg("(reconnect failed — using server relay)");
 }
 
 // 16.9.2: park while every open path is above the buffer cap. Stalled paths are
@@ -1671,7 +1671,10 @@ function updateFileRow(refs, doneBytes, totalBytes, label, speedBps) {
     const pct = totalBytes > 0 ? Math.min(100, (doneBytes / totalBytes) * 100) : 0;
     refs.fill.style.width = `${pct.toFixed(1)}%`;
     const speed = speedBps > 0 ? ` \u00b7 ${fmtBytes(speedBps)}/s` : "";
-    refs.meta.textContent = `${label} \u00b7 ${fmtBytes(doneBytes)} / ${fmtBytes(totalBytes)}${speed}`;
+    // Percentage replaces the raw byte pair: it says the same thing in less width,
+    // and the row already wraps on a phone once a speed is appended. Total is kept
+    // (it's the one number the percentage can't convey); done-bytes is dropped.
+    refs.meta.textContent = `${label} \u00b7 ${pct.toFixed(0)}% of ${fmtBytes(totalBytes)}${speed}`;
 }
 
 function completeFileRow(refs, totalBytes, finalLabel) {
@@ -1964,7 +1967,7 @@ function handleFileHdr(pt) {
         sendPayload(T_FILE_CANCEL, new Uint8Array([0x01])); // tell sender to stop
         failFileRow(f.refs, "Cancelled");
     });
-    recvFile = { tid, name, size, totalChunks: Math.max(1, Math.ceil(size / CHUNK_SIZE)), nackAttempts: 0, nackRounds: 0, receivedAtLastNack: -1, parts: [], received: 0, refs, speedSamples: [] };
+    recvFile = { tid, name, size, totalChunks: Math.max(1, Math.ceil(size / CHUNK_SIZE)), nackAttempts: 0, nackRounds: 0, receivedAtLastNack: -1, repairNoticed: false, parts: [], received: 0, refs, speedSamples: [] };
     // Replay anything that beat this header across a faster path (16.9.2);
     // the tid check in handleFileChunk drops stashed frames from other transfers.
     const replay = earlyChunks;
@@ -2083,7 +2086,21 @@ function endGraceMs(f) {
             const dv = new DataView(nackBuf.buffer);
             missing.forEach((chunkIdx, i) => dv.setUint32(1 + i * 4, chunkIdx, false));
             sendPayload(T_FILE_NACK, nackBuf);
-            appendSystemMsg(`(requesting ${missing.length} missing chunk${missing.length === 1 ? "" : "s"}\u2026)`);
+            // "requesting N missing chunks" is wire jargon and read as data
+            // corruption to testers at the exact moment the transfer was being
+            // saved. Wording stays literally true: the receiver is verifying it
+            // holds every piece before assembly, and re-requesting what it lacks.
+            // Deliberately NOT phrased as a dropped connection \u2014 reordered frames
+            // and a stalled path closed with chunks queued reach here with the
+            // link perfectly healthy \u2014 and NOT as an encryption check, which is
+            // not what runs here (the SHA-256 line is the real integrity proof).
+            // One line per transfer, not per round: repeated identical lines read
+            // as repeated failures rather than one ongoing verification.
+            if (!f.repairNoticed) {
+                f.repairNoticed = true;
+                appendSystemMsg("(verifying transfer\u2026)");
+            }
+            updateFileRow(f.refs, f.received, f.size, "Verifying", 0);
             return;
         }
     }

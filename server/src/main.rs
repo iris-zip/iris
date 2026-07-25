@@ -58,6 +58,20 @@ fn is_resume_join(attempt_before: u32, receiver_count: usize) -> bool {
     attempt_before >= 2 && receiver_count <= 1
 }
 
+// A connection is a legitimate pair member iff it is one of the first two joins
+// (attempt_before < 2 = sender/receiver) OR it is a mobile resume filling a slot with
+// at most one survivor (receiver_count <= 1: 1 = peer holding the grace slot, 0 = both
+// backgrounded at once, phone<->phone). Any other join (attempt_before >= 2 while both
+// pair members are live, receiver_count >= 2) is a third-party observer. Observers may
+// READ the relayed (encrypted) frames but must never broadcast INTO the room: without
+// this gate an observer that knows the code could send `BEEM-LEAVE` to tear the live
+// session down, or relay plaintext UI markers (BEEM-GRACE/BEEM-BACK/BEEM-CLOSE) that the
+// peers parse before the AEAD path. Membership is exactly `attempt_before < 2 ||
+// is_resume_join(..)`, so relay/eviction rights track the resume classifier.
+fn is_pair_member(attempt_before: u32, receiver_count: usize) -> bool {
+    attempt_before < 2 || is_resume_join(attempt_before, receiver_count)
+}
+
 // Per-IP hard cap on simultaneously open WS connections. Prevents a botnet from
 // accumulating idle sessions up to the 5-min session timeout. Normal flow uses
 // 2 connections (sender + receiver, different IPs). 8 is generous for reconnects.
@@ -728,11 +742,12 @@ async fn pair(mut socket: WebSocket, code: String, rooms: Rooms, session_secs: u
         // purposes on our own exit). An attacker arrives when receiver_count is 0
         // or ≥ 2 and stays marked as observer.
         let tx = entry.tx.clone();
-        let is_pair_member = attempt_before < 2 || tx.receiver_count() == 1;
+        let rc = tx.receiver_count();
+        let is_pair_member = is_pair_member(attempt_before, rc);
         // 23.7 A pair member joining while exactly one subscriber holds the slot
         // open is a resume (return from a mobile background event) — the survivor
         // may be showing the grace banner and needs a "peer is back" signal.
-        let was_resume = attempt_before >= 2 && tx.receiver_count() == 1;
+        let was_resume = attempt_before >= 2 && rc == 1;
         (tx, is_pair_member, was_resume)
     };
     let mut rx = tx.subscribe();
@@ -768,9 +783,13 @@ async fn pair(mut socket: WebSocket, code: String, rooms: Rooms, session_secs: u
             }
             incoming = socket.recv() => {
                 match incoming {
-                    Some(Ok(Message::Text(ref t))) if is_leave_marker(t) => {
-                        // 23.4 Deliberate vanish: broadcast peer-left immediately (the
-                        // peer's own rx arm turns this Close into send_close_signal with
+                    // 23.4: only a pair member may deliberately vanish. An
+                    // observer's BEEM-LEAVE must NOT evict the pair — gated like the
+                    // post-loop peer-left broadcast. A non-member marker falls through
+                    // to the relay arm below, where it is dropped (not a member).
+                    Some(Ok(Message::Text(ref t))) if is_pair_member && is_leave_marker(t) => {
+                        // Deliberate vanish: broadcast peer-left immediately (the peer's
+                        // own rx arm turns this Close into send_close_signal with
                         // CLOSE_PEER_LEFT), skip resume-grace, drop the room now. Do not
                         // forward this marker to the peer as data.
                         let _ = tx.send((my_id, Message::Close(Some(CloseFrame {
@@ -783,8 +802,15 @@ async fn pair(mut socket: WebSocket, code: String, rooms: Rooms, session_secs: u
                     }
                     Some(Ok(Message::Close(_))) | None => break,
                     Some(Ok(msg)) => {
-                        bytes_in += msg_payload_len(&msg) as u64;
-                        let _ = tx.send((my_id, msg));
+                        // only pair members may broadcast into the room. Dropping an
+                        // observer's frames here closes both the plaintext-marker spoof
+                        // (BEEM-GRACE/BEEM-BACK/BEEM-CLOSE parsed client-side pre-AEAD)
+                        // and junk-injection. Encrypted frames from an observer would
+                        // fail the peer's AEAD anyway; this just stops them at the relay.
+                        if is_pair_member {
+                            bytes_in += msg_payload_len(&msg) as u64;
+                            let _ = tx.send((my_id, msg));
+                        }
                     }
                     Some(Err(_)) => break,
                 }
@@ -1227,5 +1253,26 @@ mod tests {
             attempts += 1;
         }
         assert!(attempts >= MAX_CODE_ATTEMPTS, "brute-force cap lost its teeth");
+    }
+
+    // TEST-S-019 — only pair members may broadcast into a room (BEEM-LEAVE
+    // teardown + relay injection). An observer joining a live, full session is not a
+    // pair member, so its frames — including BEEM-LEAVE — are dropped by the gate.
+    #[test]
+    fn test_is_pair_member_gates_observer() {
+        // The two legitimate joins are always pair members.
+        assert!(is_pair_member(0, 0), "sender joins fresh room");
+        assert!(is_pair_member(1, 1), "receiver joins, sender waiting");
+        // Mobile resume: at most one survivor holds the slot open.
+        assert!(is_pair_member(2, 1), "resume — survivor holding the grace slot");
+        assert!(is_pair_member(4, 0), "both-backgrounded (phone<->phone) resume");
+        // Third-party observer probing a live session (both peers subscribed) is NOT
+        // a pair member — its BEEM-LEAVE and relayed markers must be dropped.
+        assert!(!is_pair_member(2, 2), "observer, full room");
+        assert!(!is_pair_member(3, 2), "second observer, full room");
+        assert!(!is_pair_member(2, 3), "observer while a third already present");
+        // Consistency with the resume classifier: a counted (non-resume) join into a
+        // full room is exactly the observer case the relay gate must reject.
+        assert!(!is_resume_join(2, 2) && !is_pair_member(2, 2));
     }
 }
