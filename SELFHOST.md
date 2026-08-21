@@ -77,7 +77,7 @@ defaults match a typical single-machine deployment behind a reverse proxy.
 | `BEEM_SESSION_SECS` | `3600` | Max lifetime of a paired session before the server force-closes it. |
 | `BEEM_WORDMARK_TEXT` | unset (no override) | Replaces the landing-page wordmark text with your own brand name. |
 | `BEEM_ACCENT_COLOR` | unset (no override) | Replaces the UI accent color (any valid CSS color value, e.g. `#ff6600`). |
-| `BEEM_AUDIT` | unset (off) | Set to `1` to log one stderr line per connection-end: `[audit] session=<ip-fingerprint> bytes_in=<n> bytes_out=<n> duration_s=<n>`. A paired session produces two lines (one per peer). Never logs content, pairing codes, or raw IPs — the fingerprint is a salted hash. |
+| `BEEM_AUDIT` | unset (off) | Set to `1` to log one stderr line per connection-end: `[audit] session=<ip-fingerprint> bytes_in=<n> bytes_out=<n> duration_s=<n>`. A paired session produces two lines (one per peer). Never logs content, pairing codes, or raw IPs — the fingerprint is salted with a random value minted at startup, so it correlates within one run of the server and cannot be traced back to an address afterwards. |
 
 (`BEEM_` prefix is intentional — Iriszip was originally codenamed Beem; the
 wire protocol and env vars keep the old name for deployment stability. See
