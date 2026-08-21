@@ -1,8 +1,8 @@
-# Iris
+# Iriszip
 
 End-to-end encrypted, post-quantum-hybrid, ephemeral text and file transfer between any devices — Apple, Android, PC, Mac, console, anything with a browser. Pair two devices with a 6-digit code, type or drop a file, done. No accounts, no ads, no logs, no persistence. Live at [iriszip.com](https://iriszip.com).
 
-> Iris was originally codenamed **Beem**; the wire-protocol identifiers (`beem-v1 …`, `BEEM-CLOSE:`, `BEEM_*` env vars) intentionally retain the old name for protocol and deployment stability.
+> Iriszip was originally codenamed **Beem**; the wire-protocol identifiers (`beem-v1 …`, `BEEM-CLOSE:`, `BEEM_*` env vars) intentionally retain the old name for protocol and deployment stability.
 
 ## Why
 
@@ -12,7 +12,7 @@ Most "send file to my other device" tools either:
 - ship a chat/SaaS app with accounts, logs, analytics, and a huge attack surface, or
 - use classical crypto only, so a future quantum-capable attacker who records today can decrypt years later.
 
-Iris is the opposite: nothing is persisted, the relay is blind, and the session key is hybrid — an attacker must break SPAKE2 *and* X25519 *and* ML-KEM-768 to read a transcript, classical or quantum.
+Iriszip is the opposite: nothing is persisted, the relay is blind, and the session key is hybrid — an attacker must break SPAKE2 *and* X25519 *and* ML-KEM-768 to read a transcript, classical or quantum.
 
 ## Quick start (local)
 
@@ -51,10 +51,12 @@ WebRTC picks the best available path automatically; the UI labels which one you 
 
 1. **Direct LAN** — both devices on the same network.
 2. **P2P (internet)** — a direct hole-punched peer-to-peer path.
-3. **Relay (TURN)** — a TURN relay forwards packets when a direct path can't be established (common on mobile carriers behind CGNAT). The relay is Iris's own coturn server; clients authenticate to it with short-lived credentials (2-hour expiry) minted on demand. It forwards ciphertext only and cannot read anything.
-4. **WebSocket relay through the app server** — the fallback if WebRTC fails entirely. Also ciphertext only.
+3. **Relay (TURN)** — a TURN relay forwards packets when a direct path can't be established (common on mobile carriers behind CGNAT). Clients authenticate to it with short-lived credentials minted on demand. It forwards ciphertext only and cannot read anything.
+4. **Server relay** — a WebSocket relay through the app server, the fallback if WebRTC fails entirely. Also ciphertext only.
 
 Which lane you get affects speed, never confidentiality.
+
+Note that lanes 3 and 4 are **relayed, not peer-to-peer** — the labels say so deliberately. Only *Direct LAN* and *P2P (internet)* are device-to-device. A relayed lane is exactly as confidential (the payload is encrypted end-to-end either way), but calling it "peer-to-peer" would be untrue, so we don't.
 
 ## How the security works
 
@@ -66,7 +68,9 @@ Which lane you get affects speed, never confidentiality.
 - **Channel cipher:** ChaCha20-Poly1305 with a 12-byte monotonic-counter nonce per direction and transport. Every frame carries its own nonce; a tampered frame fails AEAD and is dropped.
 - **Server role:** pure opaque-byte relay over WebSocket. It never learns the code value, key, plaintext, filenames, or sizes. It logs exactly one line at startup (the listen banner) and nothing else.
 
-The full rationale lives in the project's internal design notes.
+The full protocol specification, including the wire format and test vectors, is in
+[`SPEC-PROTOCOL.md`](./SPEC-PROTOCOL.md). The crate inventory and what each dependency
+is trusted for is in [`SPEC-CRATES.md`](./SPEC-CRATES.md).
 
 ## Threat model
 
@@ -82,7 +86,7 @@ The full rationale lives in the project's internal design notes.
 - Compromised endpoint devices (keyloggers, malware, hostile OS).
 - Malicious browser extensions with DOM access.
 - Users coerced into typing a code under duress.
-- Traffic-analysis-based deanonymization (Iris is not an anonymity tool; use Tor if that is your threat).
+- Traffic-analysis-based deanonymization (Iriszip is not an anonymity tool; use Tor if that is your threat).
 
 ## Hardening (phase 12, already shipped)
 
@@ -95,7 +99,7 @@ The full rationale lives in the project's internal design notes.
 
 ## Independent cryptographic security review
 
-The Iris cryptographic protocol was independently reviewed by the Scientific Cyber Security Association (SCSA), lead reviewer Prof. Dr. Maksim Iavich, certificate dated 19 July 2026.
+The Iriszip cryptographic protocol was independently reviewed by the Scientific Cyber Security Association (SCSA), lead reviewer Prof. Dr. Maksim Iavich, certificate dated 19 July 2026.
 
 Scope reviewed: SPAKE2, X25519, ML-KEM-768, HKDF-SHA-256 hybrid key derivation and transcript binding, and ChaCha20-Poly1305 AEAD. Every security objective evaluated — authentication, confidentiality, integrity, forward secrecy, replay and reflection resistance, MITM resistance, unknown key-share resistance, transcript binding, hybrid key security, store-now-decrypt-later resistance, and post-quantum readiness — was assessed as achieved under the review's stated assumptions and adversarial model.
 
@@ -109,7 +113,7 @@ See [`client/.well-known/security.txt`](./client/.well-known/security.txt) (cont
 
 ## Licenses
 
-Iris is open source. Every part of it can be read, run, self-hosted, and modified for free — by individuals and by companies, at any scale.
+Iriszip is open source. Every part of it can be read, run, self-hosted, and modified for free — by individuals and by companies, at any scale.
 
 - **`client/`** — [MIT](./LICENSE.client). The code that runs in your browser. Fork it, embed it, ship it.
 - **`crypto/`** — [Apache-2.0](./LICENSE.crypto). The audited encryption core, with an express patent grant, so it can be reused in other projects — including proprietary ones.
@@ -117,7 +121,7 @@ Iris is open source. Every part of it can be read, run, self-hosted, and modifie
 
 ## Self-hosting
 
-Iris is open source, so you can run your own instance. There's more than one way to expose it to the internet; see [`SELFHOST.md`](./SELFHOST.md) for the Docker single-image path (`docker compose up --build`). Below is one specific option: fronting a self-hosted instance with a Cloudflare Tunnel.
+Iriszip is open source, so you can run your own instance. There's more than one way to expose it to the internet; see [`SELFHOST.md`](./SELFHOST.md) for the Docker single-image path (`docker compose up --build`). Below is one specific option: fronting a self-hosted instance with a Cloudflare Tunnel.
 
 ### Option: Cloudflare Tunnel
 
@@ -168,6 +172,6 @@ When testing, verify:
 
 ## Roadmap
 
-Iris is developed in numbered phases. Post-1.0 plans include:
+Post-1.0 plans include:
 
 - SCSA QRNG entropy integration (Phase 14) so the 6-digit codes come from a verifiable quantum random-number generator, with OS CSPRNG as a fallback.

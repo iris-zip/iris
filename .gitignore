@@ -34,3 +34,6 @@ client/turn.json
 *.pdf
 iriszip-deposit-*.zip
 .claude/
+
+# Internal working instructions — never published
+CLAUDE.md

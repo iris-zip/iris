@@ -1,6 +1,6 @@
-# Self-hosting Iris
+# Self-hosting Iriszip
 
-Iris ships as a single Docker image: a static Rust binary plus the client's
+Iriszip ships as a single Docker image: a static Rust binary plus the client's
 static files, nothing else. There is no database, no external service
 dependency, and no persistent state — every session's data lives in memory
 for the duration of that session and is gone when it ends.
@@ -28,7 +28,7 @@ your reverse proxy.
 ## Reverse proxy
 
 Either of these terminates TLS and forwards to the container's `127.0.0.1:8080`.
-Both matter for Iris specifically: WebSocket upgrade headers must pass
+Both matter for Iriszip specifically: WebSocket upgrade headers must pass
 through (this is how devices pair and how encrypted frames relay), and the
 proxy should set `X-Forwarded-For` so the server's per-IP rate limiting sees
 the real client IP instead of the proxy's own loopback address.
@@ -79,12 +79,12 @@ defaults match a typical single-machine deployment behind a reverse proxy.
 | `BEEM_ACCENT_COLOR` | unset (no override) | Replaces the UI accent color (any valid CSS color value, e.g. `#ff6600`). |
 | `BEEM_AUDIT` | unset (off) | Set to `1` to log one stderr line per connection-end: `[audit] session=<ip-fingerprint> bytes_in=<n> bytes_out=<n> duration_s=<n>`. A paired session produces two lines (one per peer). Never logs content, pairing codes, or raw IPs — the fingerprint is a salted hash. |
 
-(`BEEM_` prefix is intentional — Iris was originally codenamed Beem; the
+(`BEEM_` prefix is intentional — Iriszip was originally codenamed Beem; the
 wire protocol and env vars keep the old name for deployment stability. See
 `README.md`.)
 
 Both branding vars are optional and off by default — leave them unset to
-run with the stock Iris/Iriszip branding.
+run with the stock Iriszip branding.
 
 ## Backups / ops
 
@@ -96,14 +96,14 @@ two devices need to re-pair.
 
 ## License
 
-Self-hosting Iris — for your own team, for customers you serve directly, or
+Self-hosting Iriszip — for your own team, for customers you serve directly, or
 for personal use — is free. The server is AGPL-3.0 (`LICENSE.server`), the
 crypto module is Apache-2.0 (`LICENSE.crypto`), and the client is MIT
 (`LICENSE.client`). See `README.md` for the full breakdown.
 
 Two practical notes for self-hosters:
 
-- **If you run Iris unmodified, you have nothing extra to do.** The AGPL's
+- **If you run Iriszip unmodified, you have nothing extra to do.** The AGPL's
   source-offer obligation is satisfied by the public repository.
 - **If you modify the server and let people outside your organisation use
   it over the network,** AGPL section 13 requires you to offer those users
