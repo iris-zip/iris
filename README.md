@@ -215,6 +215,8 @@ machine-readable pointer.
 
 ## Supporting the public service
 
-The public site is free, with no ads and no tracking, and runs on donated
-infrastructure time and bandwidth. If it is useful to you, iriszip.com/donate
-lists the ways to help keep it running.
+The public site is free, with no ads and no tracking. When both devices share
+a network, the transfer goes directly between them and costs nothing to carry.
+When they are far apart, the relayed paths run on infrastructure the project
+pays for out of pocket. Donations keep those paths open for everyone;
+[iriszip.com/donate](https://iriszip.com/donate) lists the ways to help.

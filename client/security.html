@@ -69,6 +69,21 @@
         <a href="certificate.pdf">certificate of cryptographic security review</a>.
     </p>
 
+    <h2 id="verify">Verify what you're running</h2>
+    <p>
+        The code this site serves is published at
+        <a href="https://github.com/iris-zip/iris">github.com/iris-zip/iris</a>.
+        You can check, at any moment, that the page in your browser is exactly
+        that code: open this site's source, find the
+        <code>integrity="sha384-&hellip;"</code> value next to
+        <code>app.js</code>, and compare it with the same hash published in the
+        repository's
+        <a href="https://github.com/iris-zip/iris/blob/main/HASHES.md">HASHES.md</a>.
+        If they match, the code running here is byte-for-byte the code anyone
+        can read. The encryption module checks its own hashes the same way
+        every time the page loads.
+    </p>
+
     <h2 id="report">Found a flaw?</h2>
     <p>
         Email <a href="mailto:security@iriszip.com">security@iriszip.com</a> with what
