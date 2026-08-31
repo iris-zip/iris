@@ -5,7 +5,7 @@
     <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
     <title>How Iriszip works</title>
     <link rel="icon" type="image/svg+xml" href="favicon.svg">
-    <meta name="description" content="How Iriszip keeps your files private: end-to-end encrypted, peer-to-peer, nothing stored.">
+    <meta name="description" content="How Iriszip keeps your files private: end-to-end encrypted, direct when possible, relayed when not, nothing stored.">
     <link rel="stylesheet" href="pages.css">
 </head>
 <body>
@@ -27,11 +27,13 @@
         actually happens when you use Iriszip.
     </p>
 
-    <h2>End-to-end encrypted</h2>
+    <h2>End-to-end encrypted, post-quantum</h2>
     <p>
         Your file is encrypted inside your browser before it ever leaves your
-        device. Only the device on the other end can unlock it. Nobody in between
-        &mdash; not us, not your network &mdash; can read it.
+        device, using post-quantum key exchange alongside standard encryption
+        &mdash; so it stays private even against future quantum computers. Only
+        the device on the other end can unlock it. Nobody in between &mdash; not
+        us, not your network &mdash; can read it.
     </p>
 
     <h2>Sent device to device</h2>
@@ -41,12 +43,22 @@
         an encrypted relay passes the data along &mdash; still sealed, still
         unreadable to anyone but the two of you.
     </p>
+    <p>
+        One honest note: when the connection is direct, your two devices talk
+        to each other &mdash; so, as in every direct connection on the internet,
+        the other person's device can see your network address. Our servers
+        hold it in memory only while you are connected, to route the session
+        and to stop flooding, and never log or keep it. A "relay only" option
+        that hides it from the other side too is on the roadmap.
+    </p>
 
     <h2>Nothing is stored</h2>
     <p>
-        Your file never touches our disk. We keep no copies, no contents, no
-        history. When the transfer is done, it's gone from our side because it was
-        never there to begin with.
+        Your file is never written to disk. Even when a relay is used, the
+        encrypted bytes pass through memory only and nothing is logged &mdash; no
+        copies, no contents, no record of who sent what to whom. When the
+        transfer is done, it's gone from our side because it was never kept in
+        the first place.
     </p>
 
     <h2>Open to inspection</h2>
@@ -55,7 +67,20 @@
         Iriszip was reviewed independently by the Scientific Cyber Security
         Association, who published their findings in a
         <a href="certificate.pdf">certificate of cryptographic security review</a>.
-        <!-- the source repository link lands with the public release -->
+    </p>
+
+    <h2 id="report">Found a flaw?</h2>
+    <p>
+        Email <a href="mailto:security@iriszip.com">security@iriszip.com</a> with what
+        you found and how to reproduce it. Please do not post it publicly or open a
+        public issue first: the report stays confidential until we agree together
+        that it is fixed. A person replies within three days, tells you within
+        fourteen whether we can reproduce it, and a fix ships within ninety or we
+        explain in writing why not. We ask for ninety days before you publish, and
+        we will never threaten or pursue anyone who reports in good faith. There is
+        no bug bounty; credit is yours by whatever name you choose, or none.
+        Machine-readable version:
+        <a href=".well-known/security.txt">security.txt</a>.
     </p>
 
     <nav class="pg-foot">
@@ -63,9 +88,16 @@
         <a href="security.html">How it works</a>
         <a href="about.html">About</a>
         <a href="privacy.html">Privacy</a>
-        <a href="donate.html">Support us</a>
+        <a href="terms.html">Terms</a>
+        <a href="abuse.html">Abuse &amp; legal requests</a>
+        <a href="donate.html">Support Iris</a>
         <a href="organizations.html">For organizations</a>
     </nav>
+
+    <p class="pg-legal">
+        <span>&copy; 2026 Iriszip</span>
+        <a href="https://iriszip.com/source">Open Source</a>
+    </p>
 
 </div>
 </body>

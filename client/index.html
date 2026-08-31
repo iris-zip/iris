@@ -7,10 +7,12 @@
     <link rel="icon" type="image/svg+xml" href="favicon.svg">
     <link rel="apple-touch-icon" href="apple-touch-icon.svg">
     <meta property="og:title" content="Iriszip">
-    <meta property="og:description" content="Encrypted file transfer. No account. Nothing stored.">
+    <meta property="og:description" content="Send files and messages straight to someone else. Encrypted, no account, nothing stored.">
     <meta property="og:type" content="website">
+    <link rel="preload" href="fonts/Inter-Regular.woff2" as="font" type="font/woff2" crossorigin>
+    <link rel="preload" href="fonts/JetBrainsMono-Bold.woff2" as="font" type="font/woff2" crossorigin>
     <link rel="stylesheet" href="branding.css">
-    <link rel="stylesheet" href="style.css?v=3DVbJO3fIqdg">
+    <link rel="stylesheet" href="style.css?v=F3ncWjcpnUAJ">
 </head>
 <body>
 
@@ -25,6 +27,8 @@
             <span class="bm-wordmark-text">IRISZIP</span>
             <span class="bm-wordmark-sub">Post-Quantum Encrypted Transfer</span>
         </div>
+
+        <p class="bm-hero-desc">Files and messages, from any screen to any other. Phone, tablet, laptop, desktop &mdash; if it has a modern browser, it works.</p>
 
         <div class="bm-action-stack">
             <button id="btn-send" class="bm-btn bm-btn--primary" type="button">
@@ -54,16 +58,25 @@
 
         <p class="bm-tagline">
             No account&nbsp;·&nbsp;End-to-end encrypted<br>
-            Nothing stored
+            Nothing is stored&nbsp;·&nbsp;Files up to 1&nbsp;GB
         </p>
 
-        <nav class="bm-landing-foot">
-            <a href="security.html">How it works</a>
-            <a href="about.html">About</a>
-            <a href="privacy.html">Privacy</a>
-            <a href="donate.html">Support us</a>
-            <a href="organizations.html">For organizations</a>
-        </nav>
+        <div class="bm-landing-footwrap">
+            <nav class="bm-landing-foot">
+                <a href="security.html">How it works</a>
+                <a href="about.html">About</a>
+                <a href="privacy.html">Privacy</a>
+                <a href="terms.html">Terms</a>
+                <a href="abuse.html">Abuse &amp; legal</a>
+                <a href="donate.html">Support Iris</a>
+                <a href="organizations.html">For organizations</a>
+            </nav>
+            <p class="bm-landing-legal">
+                <span>&copy; 2026 Iriszip</span>
+                <a href="https://iriszip.com/source">Open Source</a>
+                <a href="security.html">Independently audited</a>
+            </p>
+        </div>
 
     </main>
 
@@ -85,6 +98,8 @@
             </button>
         </div>
 
+        <p class="bm-code-hint">Only someone you give this code to can connect &mdash; it expires in 60&nbsp;seconds.</p>
+
         <div id="qr-code" class="bm-qr" aria-hidden="true"></div>
 
         <hr class="bm-divider">
@@ -98,17 +113,17 @@
 
     <main id="view-receiver" class="bm-view" hidden>
 
-        <label class="bm-receiver-label" for="code-input">Enter the 6-digit code</label>
+        <label class="bm-receiver-label" for="code-input">Enter the 9-digit code</label>
 
         <input id="code-input"
                type="text"
                inputmode="numeric"
-               pattern="\d{6}"
-               maxlength="6"
+               pattern="\d{9}"
+               maxlength="11"
                autocomplete="off"
                autocorrect="off"
                spellcheck="false"
-               placeholder="_ _ _ _ _ _"
+               placeholder="_ _ _ _ _ _ _ _ _"
                aria-describedby="receiver-error">
 
         <p id="receiver-error" class="bm-error-line" aria-live="polite"></p>
@@ -119,11 +134,11 @@
         </div>
 
         <div class="bm-rate-banner bm-rate-banner--30min" hidden>
-            Multiple failed attempts detected. Blocked for 30&nbsp;minutes.
+            Blocked for 30&nbsp;minutes after several failed attempts. Try again after that.
         </div>
 
         <div class="bm-rate-banner bm-rate-banner--24h" hidden>
-            Access suspended for 24&nbsp;hours due to repeated violations.
+            Blocked for 24&nbsp;hours after repeated failed attempts. Try again after that.
         </div>
 
         <button id="btn-join" class="bm-btn bm-btn--primary" type="button">Join</button>
@@ -131,28 +146,58 @@
     </main>
 
     <div id="view-chat" hidden>
-        <div id="drop-overlay" class="bm-drop-overlay" hidden aria-hidden="true">Drop file to send</div>
+        <div id="drop-overlay" class="bm-drop-overlay" hidden aria-hidden="true">
+            <svg width="22" height="22" viewBox="0 0 24 24" fill="none"
+                 stroke="currentColor" stroke-width="1.5"
+                 stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+                <path d="M12 16V4"/>
+                <path d="m6 10 6-6 6 6"/>
+                <path d="M4 20h16"/>
+            </svg>
+            <span>Release to send</span>
+        </div>
 
         <header id="chat-header">
-            <span class="bm-chat-name">Iriszip</span>
-            <div class="bm-status-chip bm-status-chip--ok" role="status" aria-live="polite">
-                <span class="bm-status-dot"></span>
-                <span>Connected</span>
+            <div class="bm-chat-ident">
+                <span class="bm-chat-name">Iriszip</span>
+                <span class="bm-chat-sep" aria-hidden="true"></span>
+                <div class="bm-status-chip bm-status-chip--ok" role="status" aria-live="polite">
+                    <span class="bm-status-dot"></span>
+                    <span>Connected</span>
+                </div>
             </div>
-            <button id="btn-vanish" class="bm-vanish-btn" type="button">
-                <svg width="13" height="13" viewBox="0 0 24 24" fill="none"
-                     stroke="currentColor" stroke-width="2"
-                     stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
-                    <polyline points="3 6 5 6 21 6"/>
-                    <path d="M19 6l-1 14H6L5 6"/>
-                    <path d="M10 11v6M14 11v6"/>
-                    <path d="M9 6V4h6v2"/>
-                </svg>
-                Kill Chat
-            </button>
+            <button id="btn-vanish" class="bm-vanish-btn" type="button" aria-live="polite">End session</button>
         </header>
 
-        <div id="chat-log" class="bm-chat-log" aria-label="Chat log" aria-live="polite"></div>
+        <div class="bm-session-strip">
+            <div class="bm-session-strip-inner">
+                <span id="session-code" class="bm-session-code"></span>
+                <span aria-hidden="true">·</span>
+                <span id="session-path">server relay</span>
+                <span aria-hidden="true">·</span>
+                <span><span class="bm-session-long">end-to-end </span>encrypted</span>
+                <span class="bm-session-long" aria-hidden="true">·</span>
+                <span class="bm-session-long">nothing stored</span>
+            </div>
+        </div>
+
+        <div class="bm-log-area">
+            <div id="chat-log" class="bm-chat-log" aria-label="Chat log" aria-live="polite"></div>
+
+            <div id="chat-empty" class="bm-chat-empty" aria-hidden="true">
+                <div class="bm-chat-empty-panel">
+                    <svg width="22" height="22" viewBox="0 0 24 24" fill="none"
+                         stroke="currentColor" stroke-width="1.5"
+                         stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+                        <path d="M12 16V4"/>
+                        <path d="m6 10 6-6 6 6"/>
+                        <path d="M4 20h16"/>
+                    </svg>
+                    <p class="bm-chat-empty-title">Drop a file, or type below</p>
+                    <p class="bm-chat-empty-sub">The log clears when the session ends.</p>
+                </div>
+            </div>
+        </div>
 
         <p id="file-status" aria-live="polite"></p>
 
@@ -167,33 +212,37 @@
         </div>
 
         <div class="bm-input-bar">
-            <button id="btn-file-pick" class="bm-icon-btn" type="button" aria-label="Attach file">
-                <svg width="16" height="16" viewBox="0 0 24 24" fill="none"
-                     stroke="currentColor" stroke-width="1.5"
-                     stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
-                    <path d="M21.44 11.05l-9.19 9.19a6 6 0 0 1-8.49-8.49l9.19-9.19a4 4 0 0 1 5.66 5.66l-9.2 9.19a2 2 0 0 1-2.83-2.83l8.49-8.48"/>
-                </svg>
-            </button>
+            <div class="bm-composer">
+                <button id="btn-file-pick" class="bm-icon-btn" type="button" aria-label="Attach file">
+                    <svg width="16" height="16" viewBox="0 0 24 24" fill="none"
+                         stroke="currentColor" stroke-width="1.5"
+                         stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+                        <path d="M21.44 11.05l-9.19 9.19a6 6 0 0 1-8.49-8.49l9.19-9.19a4 4 0 0 1 5.66 5.66l-9.2 9.19a2 2 0 0 1-2.83-2.83l8.49-8.48"/>
+                    </svg>
+                </button>
 
-            <input id="file-input" type="file" hidden aria-hidden="true">
+                <input id="file-input" type="file" hidden aria-hidden="true">
 
-            <textarea id="chat-input"
-                      rows="1"
-                      placeholder="Type or paste text&hellip;"
-                      aria-label="Message"
-                      autocomplete="off"
-                      autocorrect="off"
-                      spellcheck="true"></textarea>
+                <textarea id="chat-input"
+                          rows="1"
+                          placeholder="Type or paste text&hellip;"
+                          aria-label="Message"
+                          autocomplete="off"
+                          autocorrect="off"
+                          spellcheck="true"></textarea>
 
-            <button id="btn-chat-send" class="bm-icon-btn bm-icon-btn--primary"
-                    type="button" aria-label="Send message">
-                <svg width="18" height="18" viewBox="0 0 24 24" fill="none"
-                     stroke="currentColor" stroke-width="2.2"
-                     stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
-                    <polyline points="5 7 12 12 5 17"/>
-                    <polyline points="12 7 19 12 12 17"/>
-                </svg>
-            </button>
+                <button id="btn-chat-send" class="bm-icon-btn bm-icon-btn--primary"
+                        type="button" aria-label="Send message">
+                    <svg width="18" height="18" viewBox="0 0 24 24" fill="none"
+                         stroke="currentColor" stroke-width="2.2"
+                         stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+                        <polyline points="5 7 12 12 5 17"/>
+                        <polyline points="12 7 19 12 12 17"/>
+                    </svg>
+                </button>
+            </div>
+
+            <p class="bm-composer-hint">Enter to send · Shift + Enter for a new line</p>
         </div>
 
     </div>
@@ -204,8 +253,7 @@
         <button class="bm-fatal-retry">Start a new session</button>
     </div>
 
-    <script src="branding.js" defer></script>
-    <script src="qr.js?v=8FWZA6BGMXhs" defer integrity="sha384-8FWZA6BGMXhsfO+BLtrJK0We6gg5o1JyO8xQm6peWDEUs17ACA5ziE/NIAkl9z2k"></script>
-    <script type="module" src="app.js?v=cNFUdzl34z7B" integrity="sha384-cN/FUdzl34z7B4hAfegLPqMVX1vyDdROoRdk5q5/lMD40YQsYiq1B0SMjlGnD7/5"></script>
+    <script src="qr.js?v=2IHf4KPs0dbd" defer integrity="sha384-2IHf4KPs0dbdS7P9tzlomGLTv7pzjL7sxn18GRm+BpRRWsyOYRnWHUR/LXMw8TYz"></script>
+    <script type="module" src="app.js?v=IlyvSCPBSERN" integrity="sha384-IlyvSCPBSERN+iL90+21jrWdv4KoXbAow3sOtAYutQ5+DCJ+DsmMqDvAA8eVXnaG"></script>
 </body>
 </html>

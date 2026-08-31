@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: Apache-2.0
+// SPDX-FileCopyrightText: 2026 Scar
+
 use chacha20poly1305::{
     aead::Aead, ChaCha20Poly1305, Key, KeyInit, Nonce,
 };
@@ -31,7 +34,7 @@ impl PakeState {
 // Double-call protection lives at the FFI boundary, not here: wasm-bindgen
 // consumes the JS handle (nulls its pointer) before this body runs, so a second
 // call on the same handle throws the glue's "null pointer passed to rust"
-// TypeError. An in-struct guard could never fire (F2).
+// TypeError. An in-struct guard could never fire.
 #[wasm_bindgen]
 pub fn finish_pake(state: PakeState, peer_msg: &[u8]) -> Result<Vec<u8>, JsError> {
     state
@@ -92,7 +95,7 @@ pub fn x25519_shared(sk_bytes: &[u8], peer_pk: &[u8]) -> Result<Vec<u8>, JsError
     sk_arr.zeroize(); // From copies — wipe the local copy of the secret key
     let pk = PublicKey::from(pk_arr);
     let shared = sk.diffie_hellman(&pk);
-    // reject low-order / non-contributory peer keys (these force an all-zero
+    // Reject low-order / non-contributory peer keys (these force an all-zero
     // shared secret). Defense-in-depth — the hybrid construction already prevents
     // exploitation, but an explicit check removes the reliance on that assumption.
     if !shared.was_contributory() {
@@ -181,7 +184,7 @@ pub fn hkdf_combine(
 
 #[wasm_bindgen]
 pub fn start_pake(code: &str, role: &str) -> Result<PakeState, JsError> {
-    // the protocol layer enforces a 6-digit code; this guard makes the
+    // The protocol layer enforces a 9-digit code; this guard makes the
     // module self-defending if reused elsewhere — an empty password must not
     // silently produce a PAKE protected by nothing. Upper bound is sanity only.
     if code.is_empty() || code.len() > 64 {
@@ -237,8 +240,8 @@ mod tests {
     // TEST-W-001 — PAKE success: same code → identical derived keys
     #[wasm_bindgen_test]
     fn test_pake_success() {
-        let pa = start_pake("12345", "A").unwrap();
-        let pb = start_pake("12345", "B").unwrap();
+        let pa = start_pake("123456789", "A").unwrap();
+        let pb = start_pake("123456789", "B").unwrap();
         let msg_a = pa.msg();
         let msg_b = pb.msg();
         let key_a = finish_pake(pa, &msg_b).unwrap();
@@ -250,8 +253,8 @@ mod tests {
     // TEST-W-002 — PAKE mismatch: different codes → keys must NOT match
     #[wasm_bindgen_test]
     fn test_pake_mismatch() {
-        let pa = start_pake("123456", "A").unwrap();
-        let pb = start_pake("999999", "B").unwrap();
+        let pa = start_pake("123456789", "A").unwrap();
+        let pb = start_pake("987654321", "B").unwrap();
         let msg_a = pa.msg();
         let msg_b = pb.msg();
         let key_a = finish_pake(pa, &msg_b).unwrap();
@@ -345,16 +348,16 @@ mod tests {
     fn test_start_pake_input_validation() {
         assert!(start_pake("", "A").is_err(), "empty code must be rejected");
         assert!(start_pake(&"9".repeat(65), "A").is_err(), "oversized code must be rejected");
-        assert!(start_pake("123456", "X").is_err(), "invalid role must be rejected");
-        assert!(start_pake("123456", "A").is_ok(), "valid 6-digit code must pass");
+        assert!(start_pake("123456789", "X").is_err(), "invalid role must be rejected");
+        assert!(start_pake("123456789", "A").is_ok(), "valid 9-digit code must pass");
     }
 
     // TEST-W-009 — Full handshake E2E: PAKE + X25519 + ML-KEM → identical derived keys on both sides
     #[wasm_bindgen_test]
     fn test_full_handshake_e2e() {
         // PAKE
-        let pa = start_pake("12345", "A").unwrap();
-        let pb = start_pake("12345", "B").unwrap();
+        let pa = start_pake("123456789", "A").unwrap();
+        let pb = start_pake("123456789", "B").unwrap();
         let msg_a = pa.msg();
         let msg_b = pb.msg();
         let pake_a = finish_pake(pa, &msg_b).unwrap();

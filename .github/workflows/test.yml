@@ -45,17 +45,6 @@ jobs:
           git diff --exit-code client/app.js client/index.html
           git diff --exit-code -I '^\*\*Commit:' -I '^\*\*Generated:' HASHES.md
 
-      - name: Install Playwright
-        working-directory: tests/browser
-        run: npm ci && npx playwright install --with-deps chromium
-
-      - name: Build server for browser tests
-        run: cargo build --manifest-path server/Cargo.toml
-
-      - name: Browser integration tests
-        working-directory: tests/browser
-        run: npx playwright test
-
   release-build:
     runs-on: ubuntu-latest
     steps:

@@ -30,9 +30,11 @@ tests/browser/test-results/
 backups/
 client/turn.json
 
-# never commit: confidential audit report + local scratch
+# never commit: no pdf or zip belongs here except the published certificate
 *.pdf
-iriszip-deposit-*.zip
+!certificate.pdf
+!client/certificate.pdf
+*.zip
 .claude/
 
 # Internal working instructions — never published

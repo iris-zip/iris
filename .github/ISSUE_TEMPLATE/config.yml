@@ -1,0 +1,5 @@
+blank_issues_enabled: true
+contact_links:
+  - name: Security vulnerability
+    url: https://iriszip.com/security.html
+    about: Email security@iriszip.com, never a public issue. The security page has the policy and timeline.

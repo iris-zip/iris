@@ -6,8 +6,8 @@ before anyone else does.
 
 ## Reporting a vulnerability
 
-Email **admin@iriszip.com**. That is the only address; there is no separate
-security alias and no web form.
+Email **security@iriszip.com**. General questions that are not vulnerabilities
+go to admin@iriszip.com; both reach a person, not a ticket queue.
 
 Please include:
 

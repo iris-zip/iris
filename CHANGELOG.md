@@ -14,8 +14,9 @@ since some earlier version — there was no earlier public version.
 
 ### Pairing and transport
 
-- Pair two devices with a 6-digit code, valid for 60 seconds, single-use, good for
-  exactly two clients. Or scan the QR code and skip the typing entirely.
+- Pair two devices with a 9-digit code; its 6 routing digits are valid for 60
+  seconds, single-use, good for exactly two clients. Or scan the QR code and skip
+  the typing entirely.
 - Four connection paths, picked automatically and labelled honestly in the interface:
   direct LAN, peer-to-peer over the internet, a TURN relay for carrier networks
   behind CGNAT, and a WebSocket relay through the app server if WebRTC fails
@@ -30,9 +31,10 @@ since some earlier version — there was no earlier public version.
 
 ### Cryptography
 
-- The 6-digit code is never sent over the network. SPAKE2 over Ed25519 means both
-  sides derive the same secret only if they typed the same code; a wrong code
-  produces a different key and the handshake stops before any data moves.
+- Three of the code's 9 digits are generated in the browser and never sent to the
+  server; only the 6 routing digits ever reach it. SPAKE2 over Ed25519 runs on the
+  full code: both sides derive the same secret only if they hold the same code, and
+  a wrong code produces a different key and the handshake stops before any data moves.
 - The session key combines three independent key exchanges — SPAKE2, X25519, and
   ML-KEM-768 — through HKDF-SHA-256, salted with the full handshake transcript. An
   attacker has to break all three. ML-KEM-768 is there for the recorded-now,

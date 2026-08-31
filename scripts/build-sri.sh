@@ -1,14 +1,15 @@
 #!/usr/bin/env bash
-# Phase 15.4 — inject SHA-384 Subresource Integrity hashes into the client.
-# Phase 15.5 — also rewrite HASHES.md so the published hashes stay in sync
-#              with what the browser actually loads.
+# Inject SHA-384 Subresource Integrity hashes into the client.
+# Also rewrite HASHES.md so the published hashes stay in sync
+# with what the browser actually loads.
 #
 # Order matters:
 #   1. Hash pkg/iris_crypto.js and pkg/iris_crypto_bg.wasm.
 #   2. Rewrite the two constants in client/app.js with those hashes.
-#   3. Hash the now-updated app.js.
-#   4. Rewrite the <script> tag in client/index.html with that hash.
-#   5. Rewrite HASHES.md with all three hashes and the current git SHA.
+#   3. Hash the now-updated app.js, and hash the vendored client/qr.js.
+#   4. Rewrite the <script> tags in client/index.html with those hashes, and
+#      version-stamp the client/style.css link so the edge cannot serve a stale copy.
+#   5. Rewrite HASHES.md with all four hashes and the current git SHA.
 #
 # Idempotent: each sed pattern tolerates either the placeholder or a prior hash.
 
@@ -73,7 +74,8 @@ grep -q "src=\"qr.js?v=$QR_JS_V\" defer integrity=\"$QR_JS_SRI\"" "$INDEX" || { 
 
 # CSS cache-busting (no SRI needed — not executable): stamp ?v=<hash prefix>
 # on each stylesheet link so a content change mints a new URL and the
-# Cloudflare edge can never serve a stale copy (July 2026 recolor lesson).
+# Cloudflare edge can never serve a stale copy (a recolour once shipped stale
+# because of this).
 # branding.css is excluded: it's a dynamic server route (17.3), not a file.
 for css in style.css; do
     CSS_FILE="$CLIENT/$css"

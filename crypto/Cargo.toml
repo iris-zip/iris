@@ -12,14 +12,14 @@ wasm-bindgen-test = "0.3"
 
 [dependencies]
 wasm-bindgen = "0.2"
-# pinned pre-release: no stable spake2 exists as of 2026-05-24; re-check before next dep bump
+# pinned pre-release: no stable spake2 release exists yet; re-check before the next dependency bump
 spake2 = { version = "=0.5.0-pre.0", features = ["getrandom"] }
 getrandom = { version = "0.4", features = ["wasm_js"] }
 chacha20poly1305 = { version = "0.10", default-features = false, features = ["alloc"] }
-# zeroize feature: DecapsulationKey wipes on drop (review F5)
+# zeroize feature: DecapsulationKey wipes on drop
 ml-kem = { version = "0.2", features = ["zeroize"] }
 # zeroize feature: default-features=false had silently dropped it, leaving
-# StaticSecret/SharedSecret unwiped on drop (review F4)
+# StaticSecret/SharedSecret unwiped on drop
 x25519-dalek = { version = "2", default-features = false, features = ["static_secrets", "zeroize"] }
 hkdf = "0.12"
 sha2 = "0.10"

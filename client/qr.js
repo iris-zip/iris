@@ -14,6 +14,8 @@
 //  http://www.denso-wave.com/qrcode/faqpatent-e.html
 //
 //---------------------------------------------------------------------
+// SPDX-License-Identifier: MIT
+// (vendored third-party code — see copyright/license notice above, unchanged)
 
 var qrcode = function() {
 
