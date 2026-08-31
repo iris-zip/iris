@@ -6,8 +6,8 @@ actually loaded (Chrome DevTools → Network tab → click file → Headers /
 Response tab shows the integrity value) to confirm you're running the
 exact code in this git commit.
 
-**Commit:** `22433478243a2ddf1c88ba8fcbae32699587acf4` (`2243347`)
-**Generated:** 2026-08-28T11:22:15Z (UTC) — by `scripts/build-sri.sh`
+**Commit:** `90f952c6a78137e4918c5556c14249668ec3c5e9` (`90f952c`)
+**Generated:** 2026-08-31T20:01:56Z (UTC) — by `scripts/build-sri.sh`
 
 ## Client files (run in your browser)
 

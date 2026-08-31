@@ -7,7 +7,7 @@ one version number: the git tag, `server/Cargo.toml` and `crypto/Cargo.toml` alw
 agree. A change to the wire protocol or the key schedule is a major version, because
 two peers on different major versions cannot talk to each other.
 
-## 1.0.0 — unreleased
+## 1.0.0 — 2026-08-31
 
 First public release. Everything below is what 1.0.0 contains, not what changed
 since some earlier version — there was no earlier public version.
