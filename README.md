@@ -11,8 +11,8 @@ install, and self-hostable infrastructure. Live at [iriszip.com](https://iriszip
 
 - Open the site on two devices, match a 9-digit code (or scan a QR), and files
   and text move directly between them, end-to-end encrypted.
-- Works across ecosystems: anything with a modern browser can pair with
-  anything else, from an iPhone to an Xbox.
+- Works across modern phone, tablet, laptop and desktop browsers, regardless
+  of ecosystem. TV and console support varies by browser.
 - Nothing is stored. Sessions are ephemeral; when they end, they are gone.
 - The pairing itself is authenticated with a PAKE, and the session key is a
   hybrid of classical and post-quantum key exchange, independently reviewed.
