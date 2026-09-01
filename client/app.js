@@ -101,11 +101,27 @@ function showFatalView(title, body) {
     if (fatal) fatal.hidden = false;
 }
 
+// In-app browsers (Instagram, Facebook, Messenger, TikTok and friends) open
+// links inside a restricted WebView that injects its own scripts and limits
+// module/WASM loading, so the crypto verification above fails there. That
+// failure is environmental, not an attack — still fail closed, but tell the
+// person to open a real browser instead of showing a raw integrity error.
+function inAppBrowser() {
+    const ua = navigator.userAgent || "";
+    return /FBAN|FBAV|FB_IAB|Instagram|Line\/|musical_ly|TikTok|Snapchat/.test(ua)
+        || (/Android/.test(ua) && /; wv\)/.test(ua));
+}
+
 let cryptoMod;
 try {
     cryptoMod = await verifyAndLoadCrypto();
 } catch (e) {
-    showFatalView("Integrity check failed", e && e.message ? e.message : "Cryptographic module verification failed.");
+    if (inAppBrowser()) {
+        showFatalView("Open in your browser",
+            "Iriszip can't run inside an app's built-in browser. Tap the ⋯ or share menu and choose “Open in browser”, or copy the link into Safari, Chrome or Firefox.");
+    } else {
+        showFatalView("Integrity check failed", e && e.message ? e.message : "Cryptographic module verification failed.");
+    }
     throw e;
 }
 const {
