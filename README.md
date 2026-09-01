@@ -185,6 +185,11 @@ some TV browsers have no download manager, so a received file cannot be saved
 there. The 1 GB file cap exists mainly because of mobile browser memory
 limits, and may change.
 
+Tor Browser works at its Standard security level. The higher levels disable
+WebAssembly, which the encryption core needs, so Iriszip deliberately refuses
+to start rather than run unverified. On Tor, transfers use the relay lane,
+because Tor disables WebRTC by design.
+
 ## Repository structure and licenses
 
 Iriszip is open source. Every part of it can be read, run, self-hosted, and
