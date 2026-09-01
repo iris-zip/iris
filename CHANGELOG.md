@@ -7,6 +7,17 @@ one version number: the git tag, `server/Cargo.toml` and `crypto/Cargo.toml` alw
 agree. A change to the wire protocol or the key schedule is a major version, because
 two peers on different major versions cannot talk to each other.
 
+## 1.0.1 — 2026-09-01
+
+- In-app browsers (Instagram, Facebook and friends) now get a clear "open in
+  your browser" message when their restricted WebView cannot run the verified
+  startup, instead of a raw integrity error. Startup still fails closed.
+- Social preview card, sitemap and fuller page metadata; Tor Browser guidance
+  on the about page and in the README.
+- Wording: the hybrid key exchange is described as resisting
+  store-now-decrypt-later attacks, and the browser-support line now matches
+  the compatibility notes.
+
 ## 1.0.0 — 2026-08-31
 
 First public release. Everything below is what 1.0.0 contains, not what changed
