@@ -414,4 +414,438 @@ mod tests {
         oneshot.update(b"hello streaming world");
         assert_eq!(split.finalize_hex(), oneshot.finalize_hex());
     }
+
+    // Shared helpers for the hex-encoded known-answer vectors below.
+    fn hex_decode(s: &str) -> Vec<u8> {
+        (0..s.len())
+            .step_by(2)
+            .map(|i| u8::from_str_radix(&s[i..i + 2], 16).unwrap())
+            .collect()
+    }
+
+    fn hex_encode(bytes: &[u8]) -> String {
+        bytes.iter().map(|b| format!("{b:02x}")).collect()
+    }
+
+    // TEST-W-012 — X25519 KAT, RFC 7748 section 6.1 Alice/Bob DH example.
+    // Source: https://www.rfc-editor.org/rfc/rfc7748.txt section 6.1 (fetched directly).
+    #[wasm_bindgen_test]
+    fn test_x25519_rfc7748_section_6_1() {
+        let alice_sk = hex_decode("77076d0a7318a57d3c16c17251b26645df4c2f87ebc0992ab177fba51db92c2a");
+        let alice_pk = hex_decode("8520f0098930a754748b7ddcb43ef75a0dbf3a0d26381af4eba4a98eaa9b4e6a");
+        let bob_sk   = hex_decode("5dab087e624a8a4b79e17f8b83800ee66f3bb1292618b6fd1c2f8b27ff88e0eb");
+        let bob_pk   = hex_decode("de9edb7d7b7dc1b4d35b61c2ece435373f8343c85b78674dadfc7e146f882b4f");
+        let shared   = hex_decode("4a5d9d5ba4ce2de1728e3bf480350f25e07e21c947d19e3376f09b3c1e161742");
+        assert_eq!(x25519_shared(&alice_sk, &bob_pk).unwrap(), shared);
+        assert_eq!(x25519_shared(&bob_sk, &alice_pk).unwrap(), shared);
+    }
+
+    // TEST-W-013 — X25519 KAT, RFC 7748 section 5.2 first X25519 scalar-mult
+    // test vector (plain scalar-mult, base is contributory so it goes through
+    // x25519_shared with no rejection).
+    // Source: https://www.rfc-editor.org/rfc/rfc7748.txt section 5.2 (fetched directly).
+    #[wasm_bindgen_test]
+    fn test_x25519_rfc7748_section_5_2_vector1() {
+        let scalar = hex_decode("a546e36bf0527c9d3b16154b82465edd62144c0ac1fc5a18506a2244ba449ac4");
+        let u      = hex_decode("e6db6867583030db3594c1a424b15f7c726624ec26b3353b10a903a6d0ab1c4c");
+        let out    = hex_decode("c3da55379de9c6908e94ea4df28d084f32eccf03491c71f754b4075577a28552");
+        assert_eq!(x25519_shared(&scalar, &u).unwrap(), out);
+    }
+
+    // TEST-W-014 — X25519 negative: non-contributory / low-order peer keys rejected.
+    // The all-zero peer key and u=1 are the trivial low-order inputs (RFC 7748
+    // section 6.1 notes the all-zero shared secret comes from small-order inputs
+    // and recommends rejecting it). The third value is a documented order-8
+    // small-order point; the same constant is used as a "low order point" test
+    // vector in the Go standard library's crypto/ecdh tests
+    // (https://go.dev/src/crypto/ecdh/ecdh_test.go, lowOrderPoint), which in turn
+    // traces to the libsodium/x25519-dalek small-order blacklist. Any clamped
+    // scalar is a multiple of 8, so DH with a point whose order divides 8
+    // collapses to the identity (all-zero) shared secret, which x25519_shared
+    // rejects via was_contributory().
+    #[wasm_bindgen_test]
+    fn test_x25519_low_order_peer_rejected() {
+        let sk = [0x11u8; 32]; // arbitrary scalar; clamping normalizes it
+        let all_zero = [0u8; 32];
+        let mut one = [0u8; 32];
+        one[0] = 1;
+        let small_order = hex_decode("e0eb7a7c3b41b8ae1656e3faf19fc46ada098deb9c32b1fd866205165f49b800");
+        assert!(x25519_shared(&sk, &all_zero).is_err(), "all-zero peer key must be rejected");
+        assert!(x25519_shared(&sk, &one).is_err(), "u=1 peer key must be rejected");
+        assert!(x25519_shared(&sk, &small_order).is_err(), "small-order peer key must be rejected");
+    }
+
+    // TEST-W-015 — X25519 wrong-length inputs rejected (31 and 33 bytes on either side).
+    #[wasm_bindgen_test]
+    fn test_x25519_length_validation() {
+        let good = [0u8; 32];
+        assert!(x25519_shared(&[0u8; 31], &good).is_err(), "31-byte sk");
+        assert!(x25519_shared(&[0u8; 33], &good).is_err(), "33-byte sk");
+        assert!(x25519_shared(&good, &[0u8; 31]).is_err(), "31-byte peer pk");
+        assert!(x25519_shared(&good, &[0u8; 33]).is_err(), "33-byte peer pk");
+    }
+
+    // TEST-W-016 — ChaCha20-Poly1305 KAT, Wycheproof chacha20_poly1305_test.json,
+    // testGroups[0] (ivSize 96, keySize 256, tagSize 128), empty aad, tcId 2/34/72
+    // (empty msg, 16-byte msg, 64-byte "longer" msg).
+    // Source: https://raw.githubusercontent.com/C2SP/wycheproof/master/testvectors_v1/chacha20_poly1305_test.json
+    // (fetched directly with curl; our encrypt/decrypt have no AAD parameter, so
+    // only tcIds with "aad": "" apply). Our encrypt returns ct||tag.
+    #[wasm_bindgen_test]
+    fn test_chacha_wycheproof_valid_empty_aad() {
+        struct Case {
+            tc_id: u32,
+            key: &'static str,
+            iv: &'static str,
+            msg: &'static str,
+            ct: &'static str,
+            tag: &'static str,
+        }
+        let cases = [
+            Case {
+                tc_id: 2,
+                key: "80ba3192c803ce965ea371d5ff073cf0f43b6a2ab576b208426e11409c09b9b0",
+                iv: "4da5bf8dfd5852c1ea12379d",
+                msg: "",
+                ct: "",
+                tag: "76acb342cf3166a5b63c0c0ea1383c8d",
+            },
+            Case {
+                tc_id: 34,
+                key: "59d4eafb4de0cfc7d3db99a8f54b15d7b39f0acc8da69763b019c1699f87674a",
+                iv: "2fcb1b38a99e71b84740ad9b",
+                msg: "549b365af913f3b081131ccb6b825588",
+                ct: "e9110e9f56ab3ca483500ceabab67a13",
+                tag: "836ccabf15a6a22a51c1071cfa68fa0c",
+            },
+            Case {
+                tc_id: 72,
+                key: "5b1d1035c0b17ee0b0444767f80a25b8c1b741f4b50a4d3052226baa1c6fb701",
+                iv: "d61040a313ed492823cc065b",
+                msg: "d096803181beef9e008ff85d5ddc38ddacf0f09ee5f7e07f1e4079cb64d0dc8f5e6711cd4921a7887de76e2678fdc67618f1185586bfea9d4c685d50e4bb9a82",
+                ct: "9a4ef22b181677b5755c08f747c0f8d8e8d4c18a9cc2405c12bb51bb1872c8e8b877678bec442cfcbb0ff464a64b74332cf072898c7e0eddf6232ea6e27efe50",
+                tag: "9ff3427a0f32fa566d9ca0a78aefc013",
+            },
+        ];
+        for c in cases.iter() {
+            let key = hex_decode(c.key);
+            let iv = hex_decode(c.iv);
+            let msg = hex_decode(c.msg);
+            let mut expected = hex_decode(c.ct);
+            expected.extend_from_slice(&hex_decode(c.tag));
+            let got = encrypt(&key, &iv, &msg).unwrap();
+            assert_eq!(got, expected, "tcId {} encrypt mismatch", c.tc_id);
+            let dec = decrypt(&key, &iv, &expected).unwrap();
+            assert_eq!(dec, msg, "tcId {} decrypt mismatch", c.tc_id);
+        }
+    }
+
+    // TEST-W-017 — ChaCha20-Poly1305 negative, Wycheproof-derived (empty aad).
+    // The Wycheproof file's native "invalid" entries for the ivSize=96/keySize=256
+    // group (tcId 146-205, "Flipped bit ... in tag" etc.) all carry "aad": "000102",
+    // which our AAD-less encrypt/decrypt cannot represent; there are no native
+    // "result": "invalid" entries with "aad": "" in this file (checked by loading
+    // the fetched JSON and filtering testGroups[0] for result == "invalid": every
+    // hit has aad == "000102", none have aad == ""). So these two cases are
+    // derived locally by flipping bits in the tag of the valid, empty-aad tcId 2
+    // and tcId 34 vectors above (same Wycheproof source), following the same
+    // "Flipped bit 0 in tag" / "Tag changed to all zero" pattern the file itself
+    // uses for its non-empty-aad invalid entries.
+    #[wasm_bindgen_test]
+    fn test_chacha_wycheproof_derived_invalid_empty_aad() {
+        let key = hex_decode("80ba3192c803ce965ea371d5ff073cf0f43b6a2ab576b208426e11409c09b9b0");
+        let iv = hex_decode("4da5bf8dfd5852c1ea12379d");
+        let mut tampered = hex_decode("76acb342cf3166a5b63c0c0ea1383c8d"); // tcId 2 tag, empty msg
+        tampered[0] ^= 0x01; // flip bit 0 in tag
+        assert!(decrypt(&key, &iv, &tampered).is_err(), "tcId 2 tag with bit 0 flipped must be rejected");
+
+        let key2 = hex_decode("59d4eafb4de0cfc7d3db99a8f54b15d7b39f0acc8da69763b019c1699f87674a");
+        let iv2 = hex_decode("2fcb1b38a99e71b84740ad9b");
+        let mut ct_tag2 = hex_decode("e9110e9f56ab3ca483500ceabab67a13"); // tcId 34 ct
+        ct_tag2.extend_from_slice(&[0u8; 16]); // tag changed to all zero
+        assert!(decrypt(&key2, &iv2, &ct_tag2).is_err(), "tcId 34 tag changed to all zero must be rejected");
+    }
+
+    // TEST-W-018 — AEAD negative paths beyond the existing flipped-last-byte test:
+    // wrong key, wrong nonce, tampered ciphertext body (not just the tag),
+    // truncated ciphertext, empty ciphertext, and a bare 16-byte all-zero
+    // ciphertext (tag-only, no body) must all be rejected.
+    #[wasm_bindgen_test]
+    fn test_chacha_negative_paths() {
+        let key = [0x42u8; 32];
+        let nonce = [0u8; 12];
+        let ct = encrypt(&key, &nonce, b"negative path test").unwrap();
+
+        let mut wrong_key = key;
+        wrong_key[0] ^= 0x01; // single bit flipped
+        assert!(decrypt(&wrong_key, &nonce, &ct).is_err(), "wrong key must be rejected");
+
+        let mut wrong_nonce = nonce;
+        wrong_nonce[0] ^= 0x01;
+        assert!(decrypt(&key, &wrong_nonce, &ct).is_err(), "wrong nonce must be rejected");
+
+        let mut body_flipped = ct.clone();
+        body_flipped[0] ^= 0x01; // first ciphertext byte, not the tag
+        assert!(decrypt(&key, &nonce, &body_flipped).is_err(), "flipped ciphertext body byte must be rejected");
+
+        let truncated = &ct[..15];
+        assert!(decrypt(&key, &nonce, truncated).is_err(), "15-byte ciphertext must be rejected");
+
+        assert!(decrypt(&key, &nonce, &[]).is_err(), "empty ciphertext must be rejected");
+
+        let zeros16 = [0u8; 16];
+        assert!(decrypt(&key, &nonce, &zeros16).is_err(), "16 zero bytes (tag-only, no body) must be rejected");
+    }
+
+    // TEST-W-019 — Nonce distinctness: same key + same plaintext, different
+    // nonces, must produce different ciphertexts (ChaCha20 keystream depends on
+    // the nonce; a collision here would mean keystream reuse).
+    #[wasm_bindgen_test]
+    fn test_chacha_distinct_nonces_distinct_ciphertexts() {
+        let key = [0x77u8; 32];
+        let plain = b"same plaintext, different nonce";
+        let ct1 = encrypt(&key, &[0u8; 12], plain).unwrap();
+        let mut nonce2 = [0u8; 12];
+        nonce2[11] = 1;
+        let ct2 = encrypt(&key, &nonce2, plain).unwrap();
+        assert_ne!(ct1, ct2, "different nonces must yield different ciphertexts");
+    }
+
+    // TEST-W-020 — SHA-256 KAT, NIST FIPS 180 448-bit two-block message
+    // "abcdbcdecdefdefgefghfghighijhijkijkljklmklmnlmnomnopnopq".
+    // Verified independently (not via the sha2 crate under test) with:
+    //   python3 -c "import hashlib; print(hashlib.sha256(b'abcdbcdecdefdefgefghfghighijhijkijkljklmklmnlmnomnopnopq').hexdigest())"
+    // which prints 248d6a61d20638b8e5c026930c3e6039a33ce45964ff2167f6ecedd419db06c1,
+    // matching the value pinned below.
+    #[wasm_bindgen_test]
+    fn test_sha256_nist_two_block_vector() {
+        let mut s = Sha256Stream::new();
+        s.update(b"abcdbcdecdefdefgefghfghighijhijkijkljklmklmnlmnomnopnopq");
+        assert_eq!(
+            s.finalize_hex(),
+            "248d6a61d20638b8e5c026930c3e6039a33ce45964ff2167f6ecedd419db06c1"
+        );
+    }
+
+    // TEST-W-021 — SHA-256 KAT, NIST FIPS 180 one-million-'a' vector, fed through
+    // Sha256Stream::update in chunks to also exercise the streaming path.
+    // Verified independently (not via the sha2 crate under test) with:
+    //   python3 -c "import hashlib; print(hashlib.sha256(b'a'*1000000).hexdigest())"
+    // which prints cdc76e5c9914fb9281a1c7e284d73e67f1809a48a497200e046d39ccc7112cd0,
+    // matching the value pinned below.
+    #[wasm_bindgen_test]
+    fn test_sha256_million_a_vector() {
+        let mut s = Sha256Stream::new();
+        let chunk = [b'a'; 1000];
+        for _ in 0..1000 {
+            s.update(&chunk);
+        }
+        assert_eq!(
+            s.finalize_hex(),
+            "cdc76e5c9914fb9281a1c7e284d73e67f1809a48a497200e046d39ccc7112cd0"
+        );
+    }
+
+    // TEST-W-022 — hkdf_combine KAT, cross-checked against an independent
+    // hand-rolled RFC 5869 HKDF-Extract/HKDF-Expand (HMAC-SHA256, not the hkdf
+    // crate under test) with pake_key=[0x01]*32, x_shared=[0x02]*32,
+    // kem_shared=[0x03]*32, transcript=[0x04]*64 (salt = transcript,
+    // ikm = pake || x || kem, info = "beem-v1 aead"). Reproduce with:
+    //   python3 -c "
+    //   import hmac, hashlib
+    //   def extract(salt, ikm): return hmac.new(salt, ikm, hashlib.sha256).digest()
+    //   def expand(prk, info, l):
+    //       t = b''; okm = b''
+    //       for i in range(1, -(-l // 32) + 1):
+    //           t = hmac.new(prk, t + info + bytes([i]), hashlib.sha256).digest()
+    //           okm += t
+    //       return okm[:l]
+    //   ikm = bytes([1]*32) + bytes([2]*32) + bytes([3]*32)
+    //   prk = extract(bytes([4]*64), ikm)
+    //   print(expand(prk, b'beem-v1 aead', 32).hex())"
+    // which prints 9964fc812131c375f213030f533625fc8ee5b6283bf9fb164c8e195f06f45fca.
+    #[wasm_bindgen_test]
+    fn test_hkdf_combine_known_answer() {
+        let pake = vec![0x01u8; 32];
+        let x = vec![0x02u8; 32];
+        let kem = vec![0x03u8; 32];
+        let transcript = vec![0x04u8; 64];
+        let out = hkdf_combine(&pake, &x, &kem, &transcript).unwrap();
+        assert_eq!(
+            hex_encode(&out),
+            "9964fc812131c375f213030f533625fc8ee5b6283bf9fb164c8e195f06f45fca"
+        );
+    }
+
+    // TEST-W-023 — hkdf_combine KAT, empty transcript. Per RFC 5869 section 2.2,
+    // an absent salt is treated as a HashLen (32-byte) all-zero string; the hkdf
+    // crate's Hkdf::new(Some(&[]), ..) applies the same rule for an explicit
+    // empty salt, which is what hkdf_combine passes when transcript is empty. So
+    // the independent Python side below uses 32 zero bytes as the salt:
+    //   python3 -c "
+    //   import hmac, hashlib
+    //   def extract(salt, ikm): return hmac.new(salt, ikm, hashlib.sha256).digest()
+    //   def expand(prk, info, l):
+    //       t = b''; okm = b''
+    //       for i in range(1, -(-l // 32) + 1):
+    //           t = hmac.new(prk, t + info + bytes([i]), hashlib.sha256).digest()
+    //           okm += t
+    //       return okm[:l]
+    //   ikm = bytes([1]*32) + bytes([2]*32) + bytes([3]*32)
+    //   prk = extract(bytes(32), ikm)
+    //   print(expand(prk, b'beem-v1 aead', 32).hex())"
+    // which prints 5278d38b75d16460def1e74ca6cfadbdf17c609c7a3d6e87706b48b925eaf49f.
+    #[wasm_bindgen_test]
+    fn test_hkdf_combine_known_answer_empty_transcript() {
+        let pake = vec![0x01u8; 32];
+        let x = vec![0x02u8; 32];
+        let kem = vec![0x03u8; 32];
+        let out = hkdf_combine(&pake, &x, &kem, &[]).unwrap();
+        assert_eq!(
+            hex_encode(&out),
+            "5278d38b75d16460def1e74ca6cfadbdf17c609c7a3d6e87706b48b925eaf49f"
+        );
+    }
+
+    // TEST-W-024 — ML-KEM-768 sizes match FIPS 203 Table 3 ("Sizes (in bytes) of
+    // keys and ciphertexts of ML-KEM"): encapsulation key 1184, decapsulation
+    // key 2400, ciphertext 1088, shared secret 32.
+    // Source: https://nvlpubs.nist.gov/nistpubs/FIPS/NIST.FIPS.203.pdf, Table 3
+    // (fetched directly and read with pdftotext to confirm the row values).
+    #[wasm_bindgen_test]
+    fn test_mlkem_sizes_match_fips203_table3() {
+        assert_eq!(mlkem_ek_len(), 1184);
+        assert_eq!(mlkem_dk_len(), 2400);
+        let keypair = mlkem_keygen();
+        let dk_len = mlkem_dk_len();
+        let ek = &keypair[dk_len..];
+        let encaps_out = mlkem_encaps(ek).unwrap();
+        assert_eq!(encaps_out.len() - 32, 1088, "ciphertext must be 1088 bytes");
+    }
+
+    // TEST-W-025 — ML-KEM-768 has no seedable/deterministic entry point in this
+    // module's exported API (mlkem_keygen and mlkem_encaps always draw from
+    // OsRng), so no ACVP known-answer test can be pinned here. Confirmed via
+    // WebFetch of https://github.com/RustCrypto/KEMs/tree/master/ml-kem/tests
+    // that the ml-kem crate itself carries ACVP-derived key-gen.json and
+    // encap-decap.json vectors (its README states they are taken from the NIST
+    // ACVP repository), so KAT coverage for the primitive exists upstream even
+    // though it cannot be exercised through this crate's non-seedable API.
+    // What we *can* test here is FIPS 203's implicit-rejection property: a
+    // tampered ciphertext must decapsulate WITHOUT error to a shared secret that
+    // differs from the one produced at encapsulation time (never silently
+    // "succeed" with the same secret, and never surface a decrypt error either).
+    #[wasm_bindgen_test]
+    fn test_mlkem_tampered_ciphertext_implicit_rejection() {
+        let keypair = mlkem_keygen();
+        let dk_len = mlkem_dk_len();
+        let dk = &keypair[..dk_len];
+        let ek = &keypair[dk_len..];
+
+        let encaps_out = mlkem_encaps(ek).unwrap();
+        let ct_len = encaps_out.len() - 32;
+        let mut ct = encaps_out[..ct_len].to_vec();
+        let ss_encaps = &encaps_out[ct_len..];
+
+        ct[0] ^= 0x01; // tamper with the ciphertext
+        let ss_decaps = mlkem_decaps(dk, &ct).unwrap();
+        assert_ne!(
+            ss_encaps,
+            ss_decaps.as_slice(),
+            "tampered ciphertext must implicitly-reject to a different shared secret"
+        );
+    }
+
+    // TEST-W-026 — ML-KEM-768 wrong-length inputs rejected: bad ct length and bad
+    // dk length in decaps, bad ek length in encaps (sizes per FIPS 203 Table 3,
+    // see TEST-W-024).
+    #[wasm_bindgen_test]
+    fn test_mlkem_length_validation() {
+        let keypair = mlkem_keygen();
+        let dk_len = mlkem_dk_len();
+        let dk = &keypair[..dk_len];
+        let ek = &keypair[dk_len..];
+
+        let encaps_out = mlkem_encaps(ek).unwrap();
+        let ct_len = encaps_out.len() - 32;
+        let ct = &encaps_out[..ct_len];
+
+        assert!(mlkem_decaps(dk, &ct[..ct_len - 1]).is_err(), "1-byte-short ct must be rejected");
+        let mut ct_long = ct.to_vec();
+        ct_long.push(0);
+        assert!(mlkem_decaps(dk, &ct_long).is_err(), "1-byte-long ct must be rejected");
+
+        assert!(mlkem_decaps(&dk[..dk_len - 1], ct).is_err(), "1-byte-short dk must be rejected");
+        let mut dk_long = dk.to_vec();
+        dk_long.push(0);
+        assert!(mlkem_decaps(&dk_long, ct).is_err(), "1-byte-long dk must be rejected");
+
+        assert!(mlkem_encaps(&ek[..ek.len() - 1]).is_err(), "1-byte-short ek must be rejected");
+        let mut ek_long = ek.to_vec();
+        ek_long.push(0);
+        assert!(mlkem_encaps(&ek_long).is_err(), "1-byte-long ek must be rejected");
+    }
+
+    // TEST-W-027 — SPAKE2 finish_pake: wrong-length peer message rejected.
+    #[wasm_bindgen_test]
+    fn test_spake2_peer_message_length_validation() {
+        let pa = start_pake("123456789", "A").unwrap();
+        assert!(finish_pake(pa, &[0u8; 31]).is_err(), "31-byte peer message");
+        let pa = start_pake("123456789", "A").unwrap();
+        assert!(finish_pake(pa, &[0u8; 33]).is_err(), "33-byte peer message");
+        let pa = start_pake("123456789", "A").unwrap();
+        assert!(finish_pake(pa, &[]).is_err(), "empty peer message");
+    }
+
+    // TEST-W-028 — SPAKE2 finish_pake: a random 32-byte peer message that is not
+    // a valid group element must either be rejected outright, or (if the point
+    // decode happens to succeed) must not produce a key matching the honest
+    // counterpart's key.
+    #[wasm_bindgen_test]
+    fn test_spake2_garbage_peer_message() {
+        let pa = start_pake("123456789", "A").unwrap();
+        let pb = start_pake("123456789", "B").unwrap();
+        let msg_b = pb.msg();
+        let key_b = finish_pake(pb, &pa.msg()).unwrap();
+        // Fixed non-random "garbage" 32 bytes so the test is deterministic; not a
+        // published vector, just an arbitrary value that is not msg_b.
+        let mut garbage = [0xabu8; 32];
+        garbage[0] = 0xff;
+        assert_ne!(garbage.as_slice(), msg_b.as_slice());
+        match finish_pake(pa, &garbage) {
+            Err(_) => {} // rejected outright: fine
+            Ok(key_a) => assert_ne!(key_a, key_b, "garbage peer message must not derive the honest key"),
+        }
+    }
+
+    // TEST-W-029 — SPAKE2 role/code binding: two "A" roles with the same code
+    // must not produce equal keys (SPAKE2 requires opposite roles), and a code
+    // differing only in the last digit must not produce equal keys either.
+    #[wasm_bindgen_test]
+    fn test_spake2_role_and_code_binding() {
+        let pa1 = start_pake("123456789", "A").unwrap();
+        let pa2 = start_pake("123456789", "A").unwrap();
+        let msg1 = pa1.msg();
+        let msg2 = pa2.msg();
+        // The spake2 crate itself tags each message with its side and rejects a
+        // same-side peer with a BadSide error before any key is derived, which
+        // trivially satisfies "must not produce equal keys" (no key at all). If
+        // some future spake2 version instead produced a key here, it would still
+        // have to not equal the other side's key.
+        match (finish_pake(pa1, &msg2), finish_pake(pa2, &msg1)) {
+            (Err(_), Err(_)) => {}
+            (Ok(key1), Ok(key2)) => {
+                assert_ne!(key1, key2, "A paired with A (same code) must not produce equal keys")
+            }
+            _ => {} // one side errored, the other didn't: still not "equal keys"
+        }
+
+        let pa = start_pake("123456789", "A").unwrap();
+        let pb = start_pake("123456788", "B").unwrap(); // last digit differs
+        let msg_a = pa.msg();
+        let msg_b = pb.msg();
+        let key_a = finish_pake(pa, &msg_b).unwrap();
+        let key_b = finish_pake(pb, &msg_a).unwrap();
+        assert_ne!(key_a, key_b, "codes differing in the last digit must not produce equal keys");
+    }
 }
