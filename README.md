@@ -114,6 +114,40 @@ The review covers the cryptographic protocol design only. It does not cover
 endpoint compromise, side channels, or weak RNG. The certificate says so
 explicitly, and so do we.
 
+## How this was built
+
+Most of the code in this repository was written with an AI coding agent
+(Claude Code). I designed the protocol, decided what gets built and in what
+order, review every change, and run the test suites before anything ships.
+Iriszip is a solo project, and this is how one person builds and maintains
+something of this scope.
+
+What that does and does not mean for trust:
+
+| Part | Independently reviewed? |
+|---|---|
+| Cryptographic protocol design | Yes: SCSA review, certificate above |
+| Implementation (crypto core, server, client) | No |
+
+So the reviewed part and the machine-written part are not the same part, and
+you should read the review claim exactly that narrowly. What compensates:
+
+- The crypto core (`crypto/src/lib.rs`) is small, a little over 200 lines
+  outside its tests, and uses standard primitives in standard constructions
+  only: SPAKE2, X25519, ML-KEM-768, HKDF-SHA-256, ChaCha20-Poly1305, from the
+  RustCrypto and dalek crates. Nothing novel, nothing hand-rolled.
+- It carries known-answer tests against published vectors (RFC 7748,
+  Wycheproof, NIST SHA-256) and negative-path tests for every rejection it is
+  supposed to make, in-repo, runnable with one command (see `BUILD.md`).
+- You do not have to trust anyone about what the site actually runs. The
+  served JavaScript and WASM are byte-verifiable against this repository
+  through `HASHES.md` and the SRI hashes in `index.html`. The limit: SRI
+  covers the declared subresources, not the HTML that declares them, which
+  is why the hashes are also published here.
+- Implementation review is welcome and cheap to start: the protocol is
+  specified in `SPEC-PROTOCOL.md`, and the trusted surface is the one file
+  above. Findings go to security@iriszip.com.
+
 ## What the server can and cannot see
 
 The server is an opaque-byte relay. It sees the 6 routing digits (it issued
