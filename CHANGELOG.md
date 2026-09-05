@@ -7,6 +7,23 @@ one version number: the git tag, `server/Cargo.toml` and `crypto/Cargo.toml` alw
 agree. A change to the wire protocol or the key schedule is a major version, because
 two peers on different major versions cannot talk to each other.
 
+## 1.0.2 — 2026-09-05
+
+- Every transfer operation ends with the session that started it. Leaving a
+  session (peer gone, vanish) discards all transfer state, and nothing still in
+  flight from it can act in the next session.
+- A delivery confirmation names the transfer it confirms and carries the
+  receiver's SHA-256. The sender's card reads "Delivered" only for a verified
+  match, "Delivered · unverified" when a digest is missing, and "Checksum
+  mismatch" when the two copies differ; the receiver's card says so as well.
+  Wire format of the confirmation: the transfer id followed by the 64-character
+  lowercase hex digest.
+- Text messages are limited to 128 KB and refused before anything is sent;
+  larger text goes as a file.
+- Self-hosting: `docker-compose.yml` and `SELFHOST.md` configure the forwarded
+  client-IP header and trusted proxy, so per-client rate limits work behind the
+  reverse proxy; `IRIS_ALLOWED_ORIGINS` is documented.
+
 ## 1.0.1 — 2026-09-01
 
 - In-app browsers (Instagram, Facebook and friends) now get a clear "open in
