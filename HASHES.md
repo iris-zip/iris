@@ -6,14 +6,14 @@ actually loaded (Chrome DevTools → Network tab → click file → Headers /
 Response tab shows the integrity value) to confirm you're running the
 exact code in this git commit.
 
-**Commit:** `5c5a3690fb6adacd826cb6dbe70248a497bc556d` (`5c5a369`)
-**Generated:** 2026-09-05T10:44:16Z (UTC) — by `scripts/build-sri.sh`
+**Commit:** `1aea51f9080d98269be6e8003b399d92d0b53c5b` (`1aea51f`)
+**Generated:** 2026-09-05T11:25:42Z (UTC) — by `scripts/build-sri.sh`
 
 ## Client files (run in your browser)
 
 | File | sha384 (hex) | sha384 (SRI / base64) |
 |---|---|---|
-| `client/app.js` | `7a3754f2d1a2fdb1106f0b6a27c95a8530f08fda803cb51499d0a8a482010289b714e0ad73e77c05b0a0b736cbff81b8` | `sha384-ejdU8tGi/bEQbwtqJ8lahTDwj9qAPLUUmdCopIIBAom3FOCtc+d8BbCgtzbL/4G4` |
+| `client/app.js` | `ebe2c325b496ae4d3cd09c4d55211d7e0fad09eccf88697c08b69e7af888c88463f8da55638c6c55e4d22847145207b4` | `sha384-6+LDJbSWrk080JxNVSEdfg+tCezPiGl8CLaeeviIyIRj+NpVY4xsVeTSKEcUUge0` |
 | `client/qr.js` | `d881dfe0a3ecd1d6dd4bb3fdb739689862d3bfba738cbeecc67d7c1919be0694515acc8e6119d61d447f2d7330f13633` | `sha384-2IHf4KPs0dbdS7P9tzlomGLTv7pzjL7sxn18GRm+BpRRWsyOYRnWHUR/LXMw8TYz` |
 | `client/pkg/iris_crypto.js` | `663cc00fe61e6c2b8639eee01d9aae35b95a6817e220b9c1be0bd247ff89e6d08fdd9755d61f1dc186d79c6d66d7419a` | `sha384-ZjzAD+YebCuGOe7gHZquNblaaBfiILnBvgvSR/+J5tCP3ZdV1h8dwYbXnG1m10Ga` |
 | `client/pkg/iris_crypto_bg.wasm` | `055fc997c82ceb81ad173daff3177f8ad73ed323cdbe826b5a9e5020ed258672b85a956a5becd7297525ecbff87e1c55` | `sha384-BV/Jl8gs64GtFz2v8xd/itc+0yPNvoJrWp5QIO0lhnK4WpVqW+zXKXUl7L/4fhxV` |

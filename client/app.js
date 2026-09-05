@@ -2100,10 +2100,14 @@ function sendPayload(type, plaintext) {
 // HDR/END delivery: parks on the mobile-resume machinery like the chunk loop —
 // a WS blip mid-send reopens within the grace window and the frame goes out then.
 async function sendCtrlFrame(type, payload) {
+    const gen = sessionGen;
     if (sendPayload(type, payload)) return true;
     const retryUntil = Date.now() + RESUME_GRACE_MS + 5000;
     while (!sendCancelled && step === "chat" && Date.now() < retryUntil) {
         await new Promise(r => setTimeout(r, 250));
+        // The retry outlives a session end only as a parked promise: a frame from
+        // the old session must never go out on a new one's keys.
+        if (opStale(gen)) return false;
         if (sendPayload(type, payload)) return true;
     }
     return false;
@@ -2689,14 +2693,27 @@ async function sendFile(file) {
     hdr.set(nameBytes, 11);
     sendCancelled = false;
     sendCancelMsg = "";
-    if (!await sendCtrlFrame(T_FILE_HDR, hdr)) {
+    // This transfer belongs to the session it starts in. After every await below
+    // `gone()` asks whether that session still exists; if not, the loop marks its
+    // own card and stops — no send, no state, no guard: forgetTransferState has
+    // already handed those to the next session.
+    const gen = sessionGen;
+    const gone = () => {
+        if (!opStale(gen)) return false;
+        if (refs) failFileRow(refs, "Session ended"); // this transfer's own card, nothing else
+        return true;
+    };
+    let refs = null;
+    const hdrSent = await sendCtrlFrame(T_FILE_HDR, hdr);
+    if (gone()) return;
+    if (!hdrSent) {
         $("file-status").textContent = "Connection lost — file not sent. Try again.";
         endSendGuard();
         return;
     }
     pendingDelivery = null; // a new transfer supersedes the previous confirmation
     clearPendingDeliveryTimer(); // no watchdog may outlive the confirmation it was watching
-    const refs = appendFileRow(file.name, file.size, "out", () => {
+    refs = appendFileRow(file.name, file.size, "out", () => {
         if (sendCancelled) return;
         sendCancelled = true;
         sendCancelMsg = "Cancelled";
@@ -2736,11 +2753,14 @@ async function sendFile(file) {
             updateFileRow(refs, Math.max(0, sentBytes - dcBufferedTotal()), file.size,
                           RECONNECT_LABEL, 0);
             await waitDcSettled();
+            if (gone()) return;
             if (sendCancelled) break;
         }
         const offset = i * CHUNK_SIZE;
         const slice = file.slice(offset, Math.min(file.size, offset + CHUNK_SIZE));
         const buf = new Uint8Array(await slice.arrayBuffer());
+        if (gone()) return; // the read outlived the session — this chunk goes nowhere
+        if (sendCancelled) break;
         hasher.update(buf); // 21.2 — hash in-flight, index order, once per chunk
         const payload = new Uint8Array(1 + 4 + buf.length);
         payload[0] = tid;
@@ -2753,6 +2773,7 @@ async function sendFile(file) {
             let sent = false;
             while (!sent && !sendCancelled && step === "chat" && Date.now() < retryUntil) {
                 await new Promise(r => setTimeout(r, 250));
+                if (gone()) return;
                 sent = sendPayload(T_FILE_CHK, payload);
             }
             if (sendCancelled) break;
@@ -2779,6 +2800,7 @@ async function sendFile(file) {
                 await new Promise(r => ackResolvers.push(r));
             }
         }
+        if (gone()) return;
         if (sendCancelled) break;
         if ((i & 0x0f) === 0 || i === totalChunks - 1) {
             const t = Date.now();
@@ -2786,9 +2808,11 @@ async function sendFile(file) {
             const bps = speedSamples.reduce((a, s) => a + s[1], 0);
             updateFileRow(refs, Math.max(0, sentBytes - dcBufferedTotal()), file.size, "Sending", bps);
             await new Promise(r => setTimeout(r, 0));
+            if (gone()) return;
         }
     }
     if (!sendCancelled) await dcDrainBuffers(refs, sentBytes, file.size);
+    if (gone()) return; // drained into a session that is over: nothing below may run
     currentSendRefs = null;
     if (sendCancelled) {
         failFileRow(refs, sendCancelMsg || "Cancelled");
@@ -2856,16 +2880,26 @@ let lastSentDigestHex = ""; // this transfer's SHA-256, set once at "Sent" — c
 // file's worth; 4x leaves room for a genuinely lossy MAX_NACK_ROUNDS repair.
 let resentBytes = 0;
 const RESEND_BUDGET_FACTOR = 4;
+let sessionGen = 0; // see forgetTransferState
+// True once the session an operation started in has ended. Checked after every
+// await and before every send in the transfer paths.
+function opStale(gen) { return gen !== sessionGen; }
 // Everything a transfer leaves behind belongs to the session that ran it. A
 // session end (peer gone, vanish) drops it all, so nothing a later peer sends —
 // a NACK, a DONE, a stray chunk — can find a file, a confirmation slot or a
 // partial assembly to act on. Called from endChatSession and _doVanish.
 function forgetTransferState() {
-    // A send loop still parked on its last ACK wakes up (drainAckWaiters) and must
-    // take its cancel exit, not its "Sent" exit — that exit would hold the file
-    // again. sendFile resets the flag when the next transfer starts.
+    // Every asynchronous transfer operation (sendFile, handleFileNack, sendCtrlFrame)
+    // captured sessionGen when it started and re-checks it after each await: once
+    // the number has moved on, the operation belongs to a session that no longer
+    // exists and stops without sending, without touching any state cleared here
+    // and without changing a newer transfer's card or guards. A WebSocket resume
+    // inside one session never comes through here, so it keeps its operations.
+    sessionGen += 1;
     sendCancelled = true;
     sendCancelMsg = "Session ended";
+    endSendGuard(); // the file button belongs to the next session, not to a loop that is about to exit
+    currentSendRefs = null;
     lastSentFile = null;
     lastSentTid = -1;
     lastSentDigestHex = "";
@@ -3273,41 +3307,52 @@ function endGraceMs(f) {
         // plain hash, no verdict, exactly today's display.
         const verdict = senderDigestHex ? (cs === senderDigestHex ? "match" : "mismatch") : null;
         attachChecksum(f.refs, cs, verdict);
+        // The file is here and downloadable, but it is not the file that was sent;
+        // the card must not read as a clean receipt.
+        if (verdict === "mismatch") setFileMeta(f.refs, "Received \u00b7 checksum differs from the sender's", true);
     }
 }
 
 // Receiver confirmed assembly (T_FILE_DONE) — the only point where the sender
 // may claim more than "Sent". A stray DONE with nothing pending is dropped.
 function handleFileDone(pt) {
-    if (!pendingDelivery) return;
-    // DONE payload: tid(1) || digestHex(64 UTF-8), the digest absent when the
-    // receiver has none. A confirmation is credited only to the transfer it names:
-    // any other tid, or any other length, is not a confirmation of this one and is
-    // dropped. Older peers send the digest alone (64) or nothing (0); both are still
-    // read, with no tid to check.
+    const p = pendingDelivery;
+    if (!p) return;
+    // Wire format: tid(1) || digestHex(64, lowercase hex), the digest absent when
+    // the receiver could not hash. Both peers run the same app.js served by the
+    // same origin, so this is the only format there is: anything else — any other
+    // length, any other tid, a digest that is not hex — is not a confirmation of
+    // this transfer and changes nothing, not even the watchdog.
+    if (pt.length !== 1 && pt.length !== 65) return;
+    if (pt[0] !== p.tid) return;
     let peerDigestHex = null;
-    if (pt.length === 1 || pt.length === 65) {
-        if (pt[0] !== pendingDelivery.tid) return;
-        if (pt.length === 65) peerDigestHex = textDec.decode(pt.subarray(1));
-    } else if (pt.length === 64) {
-        peerDigestHex = textDec.decode(pt);
-    } else if (pt.length !== 0) {
-        return;
+    if (pt.length === 65) {
+        peerDigestHex = textDec.decode(pt.subarray(1));
+        if (!/^[0-9a-f]{64}$/.test(peerDigestHex)) return;
     }
+    // lastSentDigestHex belongs to this same transfer: it's set once, right before
+    // this transfer's END goes out, pendingDelivery is cleared the instant a new
+    // send starts, and a session end clears both.
+    const ours = lastSentDigestHex;
+    const verdict = peerDigestHex && ours ? (peerDigestHex === ours ? "match" : "mismatch") : null;
+    // From here on this IS the confirmation of this transfer.
     clearPendingDeliveryTimer(); // confirmation arrived — the watchdog's job is done
     // The receiver confirmed assembly, so any repair round this transfer ran is
     // over. Close its notice out or the log keeps claiming pieces are still in
     // flight for the rest of the session.
-    settleSystemMsg(pendingDelivery.repairMsgEl, "(missing pieces re-sent)");
-    completeFileRow(pendingDelivery.refs, pendingDelivery.size, "Delivered");
-    // lastSentDigestHex belongs to this same transfer: it's set once, right before
-    // this transfer's END goes out, and pendingDelivery — gating this whole
-    // function — is cleared the instant a new send starts (before that send's own
-    // digest overwrites it), so the two can never point at different transfers here.
-    if (lastSentDigestHex) {
-        const verdict = peerDigestHex ? (peerDigestHex === lastSentDigestHex ? "match" : "mismatch") : null;
-        attachChecksum(pendingDelivery.refs, lastSentDigestHex, verdict);
+    settleSystemMsg(p.repairMsgEl, "(missing pieces re-sent)");
+    if (verdict === "mismatch") {
+        // The peer holds a complete file whose digest is not ours. That is not a
+        // delivery of this file, and the card must not say it was.
+        failFileRow(p.refs, "Checksum mismatch \u2014 the copy that arrived differs; send it again");
+    } else if (verdict === "match") {
+        completeFileRow(p.refs, p.size, "Delivered");
+    } else {
+        // One side has no digest: the peer holds a complete file, but nothing here
+        // has verified it, and the card says exactly that.
+        completeFileRow(p.refs, p.size, "Delivered \u00b7 unverified");
     }
+    if (ours) attachChecksum(p.refs, ours, verdict);
     pendingDelivery = null;
 }
 
@@ -3351,6 +3396,12 @@ async function handleFileNack(pt) {
     if (!lastSentFile || pt.length < 5 || (pt.length - 1) % 4 !== 0) return;
     const tid = pt[0];
     if (tid !== lastSentTid) return; // NACK for a superseded transfer (16.9.6) — its file is gone, fail clean
+    // Pinned for the whole round: the globals may be cleared (session end) or
+    // replaced (next send) while a read below is in flight, and this round must
+    // then stop rather than read whatever is there now. `dead()` is the one test.
+    const gen = sessionGen;
+    const file = lastSentFile;
+    const dead = () => opStale(gen) || sendCancelled || step !== "chat" || lastSentFile !== file || tid !== lastSentTid;
     const count = (pt.length - 1) / 4;
     const dv = new DataView(pt.buffer, pt.byteOffset, pt.byteLength);
     // A NACK may only ask for chunks this file HAS, and only once each. Neither was
@@ -3361,7 +3412,7 @@ async function handleFileNack(pt) {
     // handleChatPayload dispatches this without awaiting it. An honest receiver sends
     // each missing index exactly once (see handleFileEnd's builder), so range-checking
     // and de-duplicating costs a real repair round nothing.
-    const totalChunks = Math.max(1, Math.ceil(lastSentFile.size / CHUNK_SIZE));
+    const totalChunks = Math.max(1, Math.ceil(file.size / CHUNK_SIZE));
     const wanted = [];
     const seen = new Set();
     for (let j = 0; j < count; j++) {
@@ -3389,17 +3440,18 @@ async function handleFileNack(pt) {
     }
     for (let j = 0; j < wanted.length; j++) {
         if (dcReconnecting) await waitDcSettled(); // 16.9.1: same park as the main loop
-        // lastSentFile re-checked each pass: a T_FILE_CANCEL (0x01) arriving
-        // mid-round nulls it and sets sendCancelled (16.8.2)
-        if (step !== "chat" || sendCancelled || !lastSentFile || tid !== lastSentTid) return;
+        // Re-checked each pass: a T_FILE_CANCEL (0x01) arriving mid-round nulls the
+        // file and sets sendCancelled (16.8.2); a session end moves sessionGen on.
+        if (dead()) return;
         const idx = wanted[j];
         const offset = idx * CHUNK_SIZE;
-        const slice = lastSentFile.slice(offset, Math.min(lastSentFile.size, offset + CHUNK_SIZE));
+        const slice = file.slice(offset, Math.min(file.size, offset + CHUNK_SIZE));
         const buf = new Uint8Array(await slice.arrayBuffer());
+        if (dead()) return; // the read outlived the round
         // De-duplication bounds ONE round to a file's worth; this bounds the session,
         // where the frames themselves are unlimited. Stop the round rather than
         // announcing it: a system line here would hand a flooding peer the chat log.
-        if (resentBytes + buf.length > lastSentFile.size * RESEND_BUDGET_FACTOR) return;
+        if (resentBytes + buf.length > file.size * RESEND_BUDGET_FACTOR) return;
         resentBytes += buf.length;
         const payload = new Uint8Array(1 + 4 + buf.length);
         payload[0] = tid;
@@ -3415,8 +3467,9 @@ async function handleFileNack(pt) {
                 await new Promise(r => ackResolvers.push(r));
             }
         }
+        if (dead()) return;
     }
-    if (sendCancelled) return;
+    if (dead()) return;
     // The main send loop drains before its END; this round must too. dcBackpressure
     // above only caps the queue, so without this the loop finishes with megabytes
     // still buffered and END — which rides the fast WS lane — overtakes them. The
@@ -3424,7 +3477,7 @@ async function handleFileNack(pt) {
     // round on a healthy transfer (seen in testing: 124-chunk round re-requested 70).
     await dcDrainBuffers(null, 0, 0);
     repairActiveAt = Date.now(); // the drain itself is work, and can take seconds
-    if (sendCancelled) return;
+    if (dead()) return;
     // Same digest as the first END for this transfer (tid still matches lastSentTid,
     // checked above) — the receiver's verification must not depend on which round
     // of chunks actually landed.
