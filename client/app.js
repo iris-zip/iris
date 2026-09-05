@@ -1774,38 +1774,56 @@ async function derivePathLabel() {
         live++;
         try {
             const stats = await path.pc.getStats();
-            // `nominated` alone is not dependable: Chrome reported it on the first
-            // derivation and not on later ones, so re-deriving turned a perfectly
-            // good `direct lan` into `direct (unverified)` mid-session
-            // while ICE was still host/host on all four paths. Accept a
-            // succeeded/selected pair too — that is what the connection is using.
-            // ...but "accept a succeeded pair" was implemented as "keep whichever
-            // succeeded pair the stats map yields LAST", and a connection routinely has
-            // more than one. Observed on a real device: on all four connections ICE
-            // reported host/host AND srflx/srflx, both `nominated`, simultaneously — so
-            // the printed label depended on map iteration order. The PC walked
-            // "server relay" → "p2p (internet)" → "direct lan" on a device that never
-            // left the WiFi, and the two ends still disagreed at the end. Rank the pairs
-            // instead: a relay pair is the WEAKEST answer, not the strongest, and must
-            // never mask a host pair on the same connection. In-use (nominated/selected)
-            // outranks specificity, because a nominated relay really is what is carrying
-            // the bytes even when a host pair merely succeeded.
+            // The spec gives one ground-truth answer for "which pair is actually
+            // carrying bytes right now": RTCTransportStats.selectedCandidatePairId
+            // (https://www.w3.org/TR/webrtc-stats/#dom-rtctransportstats-selectedcandidatepairid).
+            // Every browser this app supports reports it. Prefer it outright — no
+            // ranking needed, this is not a guess.
             let pair = null;
-            let pairRank = -1;
             stats.forEach(s => {
-                if (s.type !== "candidate-pair") return;
-                const inUse = !!(s.nominated || s.selected);
-                if (!inUse && s.state !== "succeeded") return;
-                const lt = stats.get(s.localCandidateId)?.candidateType;
-                const rt = stats.get(s.remoteCandidateId)?.candidateType;
-                let rank;
-                if (lt === "relay" || rt === "relay") rank = 0;
-                else if (lt === "srflx" || rt === "srflx") rank = 1;
-                else if (lt === "host" && rt === "host") rank = 3;
-                else rank = 2;                       // prflx, or a mixed non-relayed pair
-                if (inUse) rank += 4;
-                if (rank > pairRank) { pairRank = rank; pair = s; }
+                if (pair || s.type !== "transport" || !s.selectedCandidatePairId) return;
+                const p = stats.get(s.selectedCandidatePairId);
+                if (p) pair = p;
             });
+            if (!pair) {
+                // No transport entry, or it named a pair id absent from this same
+                // report (a stale id read mid-renegotiation) — fall back to a
+                // heuristic. `nominated` alone is not dependable: Chrome reported it
+                // on the first derivation and not on later ones, so re-deriving
+                // turned a perfectly good `direct lan` into `direct (unverified)`
+                // mid-session while ICE was still host/host on all four paths.
+                // Accept a succeeded/selected pair too — that is what the
+                // connection is using. ...but "accept a succeeded pair" was
+                // implemented as "keep whichever succeeded pair the stats map
+                // yields LAST", and a connection routinely has more than one.
+                // Observed on a real device: on all four connections ICE reported
+                // host/host AND srflx/srflx, both `nominated`, simultaneously — so
+                // the printed label depended on map iteration order. Rank the pairs
+                // instead: a relay pair is the WEAKEST answer, not the strongest,
+                // and must never mask a host pair on the same connection. In-use
+                // (nominated/selected) outranks specificity, because a nominated
+                // relay really is what is carrying the bytes even when a host pair
+                // merely succeeded.
+                // Still a heuristic, not proof: without selectedCandidatePairId this
+                // can rank a merely-succeeded host/host pair above the relay pair
+                // that is actually in use if neither reports nominated/selected (seen
+                // with a real relay-selected connection on an older stats surface).
+                let pairRank = -1;
+                stats.forEach(s => {
+                    if (s.type !== "candidate-pair") return;
+                    const inUse = !!(s.nominated || s.selected);
+                    if (!inUse && s.state !== "succeeded") return;
+                    const lt = stats.get(s.localCandidateId)?.candidateType;
+                    const rt = stats.get(s.remoteCandidateId)?.candidateType;
+                    let rank;
+                    if (lt === "relay" || rt === "relay") rank = 0;
+                    else if (lt === "srflx" || rt === "srflx") rank = 1;
+                    else if (lt === "host" && rt === "host") rank = 3;
+                    else rank = 2;                       // prflx, or a mixed non-relayed pair
+                    if (inUse) rank += 4;
+                    if (rank > pairRank) { pairRank = rank; pair = s; }
+                });
+            }
             if (!pair) continue;
             const local  = stats.get(pair.localCandidateId);
             const remote = stats.get(pair.remoteCandidateId);
