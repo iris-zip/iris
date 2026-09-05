@@ -312,7 +312,7 @@ const T_BYE       = 0x05; // immediate vanish signal — peer calls endChatSessi
 const T_FILE_NACK = 0x06; // missing chunk indices (uint32 BE each) — receiver→sender retransmit request
 const T_FILE_ACK  = 0x07; // chunk receipt acknowledgement — receiver→sender, one per chunk over WS relay
 const T_FILE_CANCEL = 0x08; // 16.8.2 — payload[0]: 0x00 sender aborted its outgoing file, 0x01 receiver rejects the incoming file. Always sent via WS, so it overtakes queued DC chunks.
-const T_FILE_DONE = 0x09; // delivery confirmation — receiver→sender after successful assembly; flips the sender row "Sent" → "Delivered"
+const T_FILE_DONE = 0x09; // delivery confirmation — receiver→sender after successful assembly: tid(1) || digestHex(64, optional); flips the sender row "Sent" → "Delivered"
 // WebRTC signaling — travel over existing encrypted WS relay, no server changes needed
 const T_RTC_OFFER = 0x10;
 const T_RTC_ANSWER = 0x11;
@@ -585,6 +585,11 @@ const COUNTER_MAX = (1n << 64n) - 1n;
 // before decrypt so a hostile relay/peer can't force a giant allocation. Largest
 // legitimate frame is a 128 KiB chunk + 29 B crypto overhead.
 const MAX_FRAME = 200 * 1024;
+// A text message travels as ONE frame, and MAX_FRAME is what both the relay and
+// the peer accept, so the text itself is bounded here — with generous room for the
+// type byte, nonce and tag — and refused before anything is sent. Larger text goes
+// as a file, which is chunked.
+const MAX_TEXT_BYTES = 128 * 1024;
 
 // Phase 26.1: the frame type is authenticated. The AEAD covers `type ‖ payload`;
 // the outer frame[0] is only a wire-visible copy so offsets and sizes stay as
@@ -1444,6 +1449,7 @@ function endChatSession() {
     settleDcReconnect(); // abandon any in-flight DC rebuild + wake parked loops (16.9.1)
     clearRecvStall(); // 21.4 — no watchdog may outlive the session
     clearPendingDeliveryTimer(); // same rule for the sender-side confirmation watchdog
+    forgetTransferState(); // and no transfer state may either
     stopWsKeepalive();
     stopPeerSilenceWatch(); // no watchdog may outlive the session
     stopPathLabelWatch();
@@ -1521,6 +1527,7 @@ function _doVanish() {
     settleDcReconnect(); // 16.9.1: abandon any DC rebuild + wake parked loops
     clearRecvStall(); // 21.4 — no watchdog may outlive the session
     clearPendingDeliveryTimer(); // same rule for the sender-side confirmation watchdog
+    forgetTransferState(); // and no transfer state may either
     stopWsKeepalive();
     stopPeerSilenceWatch(); // no watchdog may outlive the session
     stopPathLabelWatch();
@@ -2161,7 +2168,12 @@ function sendChat() {
     }
     const text = $("chat-input").value;
     if (!text) return;
-    if (sendPayload(T_TEXT, textEnc.encode(text))) {
+    const bytes = textEnc.encode(text);
+    if (bytes.length > MAX_TEXT_BYTES) {
+        appendSystemMsg(`(message is ${fmtBytes(bytes.length)} — the limit is ${fmtBytes(MAX_TEXT_BYTES)}; save it as a file and send that)`);
+        return;
+    }
+    if (sendPayload(T_TEXT, bytes)) {
         appendChatMsg("out", text);
         $("chat-input").value = "";
     }
@@ -2803,7 +2815,7 @@ async function sendFile(file) {
     removeCancelBtn(refs);
     updateFileRow(refs, file.size, file.size, "Sent", 0);
     refs.row.classList.add("bm-file-row--pending"); // bar goes inert grey — not done yet
-    pendingDelivery = { refs, size: file.size }; // green "Delivered" only on T_FILE_DONE
+    pendingDelivery = { refs, size: file.size, tid }; // green "Delivered" only on T_FILE_DONE naming this tid
     armPendingDeliveryTimer(); // say so if that confirmation never comes
     // Verdict is unknown until T_FILE_DONE brings the receiver's digest back —
     // handleFileDone re-attaches this same card's widget once it does.
@@ -2844,6 +2856,25 @@ let lastSentDigestHex = ""; // this transfer's SHA-256, set once at "Sent" — c
 // file's worth; 4x leaves room for a genuinely lossy MAX_NACK_ROUNDS repair.
 let resentBytes = 0;
 const RESEND_BUDGET_FACTOR = 4;
+// Everything a transfer leaves behind belongs to the session that ran it. A
+// session end (peer gone, vanish) drops it all, so nothing a later peer sends —
+// a NACK, a DONE, a stray chunk — can find a file, a confirmation slot or a
+// partial assembly to act on. Called from endChatSession and _doVanish.
+function forgetTransferState() {
+    // A send loop still parked on its last ACK wakes up (drainAckWaiters) and must
+    // take its cancel exit, not its "Sent" exit — that exit would hold the file
+    // again. sendFile resets the flag when the next transfer starts.
+    sendCancelled = true;
+    sendCancelMsg = "Session ended";
+    lastSentFile = null;
+    lastSentTid = -1;
+    lastSentDigestHex = "";
+    resentBytes = 0;
+    pendingDelivery = null;
+    recvFile = null;
+    earlyChunks = [];
+    earlyEndPt = null;
+}
 // 16.9.6 single-transfer guard + per-transfer ID (1 byte, wraps mod 256).
 // The ID stamps HDR/CHK/END/NACK so stray in-flight frames from a finished or
 // superseded transfer can never land inside the next file's parts.
@@ -3201,9 +3232,14 @@ function endGraceMs(f) {
         for (let i = 0; i < f.totalChunks; i++) hasher.update(f.parts[i]);
         cs = hasher.finalize_hex();
     } catch (_) {}
-    // DONE payload: digestHex(64 UTF-8), or empty when our own hashing failed —
-    // the sender's defensive parse treats empty exactly like a bare-tid END.
-    sendPayload(T_FILE_DONE, cs ? textEnc.encode(cs) : new Uint8Array(0)); // assembly verified — confirm delivery to the sender
+    // DONE payload: tid(1) || digestHex(64 UTF-8), the digest left off when our own
+    // hashing failed. The tid names the transfer being confirmed, so the sender
+    // credits exactly this file and nothing that came after it.
+    const csBytes = cs ? textEnc.encode(cs) : null;
+    const done = new Uint8Array(1 + (csBytes && csBytes.length === 64 ? 64 : 0));
+    done[0] = f.tid;
+    if (done.length === 65) done.set(csBytes, 1);
+    sendPayload(T_FILE_DONE, done); // assembly verified — confirm delivery to the sender
 
     if (isPreviewable) {
         previewUrls.push(url);
@@ -3244,16 +3280,26 @@ function endGraceMs(f) {
 // may claim more than "Sent". A stray DONE with nothing pending is dropped.
 function handleFileDone(pt) {
     if (!pendingDelivery) return;
+    // DONE payload: tid(1) || digestHex(64 UTF-8), the digest absent when the
+    // receiver has none. A confirmation is credited only to the transfer it names:
+    // any other tid, or any other length, is not a confirmation of this one and is
+    // dropped. Older peers send the digest alone (64) or nothing (0); both are still
+    // read, with no tid to check.
+    let peerDigestHex = null;
+    if (pt.length === 1 || pt.length === 65) {
+        if (pt[0] !== pendingDelivery.tid) return;
+        if (pt.length === 65) peerDigestHex = textDec.decode(pt.subarray(1));
+    } else if (pt.length === 64) {
+        peerDigestHex = textDec.decode(pt);
+    } else if (pt.length !== 0) {
+        return;
+    }
     clearPendingDeliveryTimer(); // confirmation arrived — the watchdog's job is done
     // The receiver confirmed assembly, so any repair round this transfer ran is
     // over. Close its notice out or the log keeps claiming pieces are still in
     // flight for the rest of the session.
     settleSystemMsg(pendingDelivery.repairMsgEl, "(missing pieces re-sent)");
     completeFileRow(pendingDelivery.refs, pendingDelivery.size, "Delivered");
-    // DONE payload: digestHex(64 UTF-8), or empty when the receiver sent no digest
-    // (older peer, or its own hashing failed) — never anything else, but parsed
-    // defensively (exact-length check) so a stray/odd-length frame can't throw.
-    const peerDigestHex = pt && pt.length === 64 ? textDec.decode(pt) : null;
     // lastSentDigestHex belongs to this same transfer: it's set once, right before
     // this transfer's END goes out, and pendingDelivery — gating this whole
     // function — is cleared the instant a new send starts (before that send's own

@@ -10,6 +10,14 @@ services:
       # off the host's public interfaces.
       - BEEM_HOST=0.0.0.0
       - BEEM_PORT=8080
+      # Behind the reverse proxy from SELFHOST.md every request reaches the
+      # container from the compose bridge gateway, so without these two lines the
+      # per-IP rate limits and the ban ladder would treat ALL clients as one
+      # address (one abusive visitor bans everyone). The subnet is pinned below so
+      # the gateway address is known. nginx and Caddy both set X-Forwarded-For; if
+      # your proxy uses another header (e.g. cf-connecting-ip), change the name.
+      - IRIS_CLIENT_IP_HEADER=x-forwarded-for
+      - IRIS_TRUSTED_PROXIES=172.28.0.1
     restart: unless-stopped
     healthcheck:
       test: ["CMD", "curl", "-fsS", "http://127.0.0.1:8080/"]
@@ -17,3 +25,10 @@ services:
       timeout: 3s
       start_period: 5s
       retries: 3
+
+networks:
+  default:
+    ipam:
+      config:
+        - subnet: 172.28.0.0/24
+          gateway: 172.28.0.1

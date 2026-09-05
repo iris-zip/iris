@@ -31,7 +31,10 @@ Either of these terminates TLS and forwards to the container's `127.0.0.1:8080`.
 Both matter for Iriszip specifically: WebSocket upgrade headers must pass
 through (this is how devices pair and how encrypted frames relay), and the
 proxy should set `X-Forwarded-For` so the server's per-IP rate limiting sees
-the real client IP instead of the proxy's own loopback address.
+the real client IP instead of the proxy's own address. The shipped
+`docker-compose.yml` already tells the server to believe that header from the
+compose bridge gateway (`IRIS_CLIENT_IP_HEADER` / `IRIS_TRUSTED_PROXIES` below);
+if your proxy sends a different header, change the name there.
 
 ### nginx
 
@@ -77,6 +80,9 @@ defaults match a typical single-machine deployment behind a reverse proxy.
 | `BEEM_SESSION_SECS` | `3600` | Max lifetime of a paired session before the server force-closes it. |
 | `BEEM_WORDMARK_TEXT` | unset (no override) | Replaces the landing-page wordmark text with your own brand name. |
 | `BEEM_ACCENT_COLOR` | unset (no override) | Replaces the UI accent color (any valid CSS color value, e.g. `#ff6600`). |
+| `IRIS_CLIENT_IP_HEADER` | unset (no header read) | Name of the **one** forwarded-IP header to believe, e.g. `cf-connecting-ip` or `x-forwarded-for`. **Set this if a proxy fronts the server.** While it is unset the per-IP rate limits, the attempt budget, the 30-minute/24-hour ban ladder and the concurrent-connection cap all key on the TCP peer — which behind a proxy is the proxy, so every client shares one bucket. The server prints a startup notice saying so. |
+| `IRIS_TRUSTED_PROXIES` | unset (loopback only) | Comma-separated exact addresses whose forwarded header is believed, and which are skipped as hops while walking it. Loopback is always trusted, so this is only needed when the proxy reaches the server from another address — **The shipped `docker-compose.yml` pins the bridge subnet to `172.28.0.0/24` and sets this to the gateway `172.28.0.1` for you.** If a header is configured but never gets believed, the server warns once. |
+| `IRIS_ALLOWED_ORIGINS` | unset (same-origin only) | Comma-separated extra origins accepted on the `/ws` handshake, matched whole and including the scheme (e.g. `https://app.example`). By default a browser socket is accepted only when its `Origin` host matches the `Host` the server was addressed as; this refuses a hostile page from spending a visitor's attempt budget. Needed only when the page is served from a different host than the socket. A request with **no** `Origin` (a CLI client) is always allowed — only browsers are bound by that header. |
 | `BEEM_AUDIT` | unset (off) | Set to `1` to log one stderr line per connection-end: `[audit] session=<ip-fingerprint> bytes_in=<n> bytes_out=<n> duration_s=<n>`. A paired session produces two lines (one per peer). Never logs content, pairing codes, or raw IPs — the fingerprint is salted with a random value minted at startup, so it correlates within one run of the server and cannot be traced back to an address afterwards. |
 
 (`BEEM_` prefix is intentional — Iriszip was originally codenamed Beem; the
