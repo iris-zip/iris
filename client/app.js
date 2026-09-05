@@ -1744,10 +1744,22 @@ function pickDcPath() {
 //
 // Re-derivation is cheap and setSessionPath only animates on an actual change, so
 // a stable path does not flicker.
+// A transfer stripes across every open channel at once, so the one label the
+// strip shows is only true if it is true of EVERY byte. The label is therefore
+// the weakest route any live channel is using: one channel on TURN makes the
+// session "relay (turn)" no matter how many others are host/host — those bytes
+// really do pass through the relay box. Ordered weakest first.
+const PATH_LABEL_STRENGTH = ["relay (turn)", "p2p (internet)", "direct", "direct lan"];
+function weakerPathLabel(a, b) {
+    if (!a) return b;
+    if (!b) return a;
+    return PATH_LABEL_STRENGTH.indexOf(a) <= PATH_LABEL_STRENGTH.indexOf(b) ? a : b;
+}
+
 async function derivePathLabel() {
     const open = openDcPaths();
     if (!open.length) return "server relay";
-    let best = null;
+    let best = null; // weakest label seen across all live channels
     let live = 0;
     for (const path of open) {
         // A DataChannel stays readyState:"open" while its PeerConnection has
@@ -1797,15 +1809,16 @@ async function derivePathLabel() {
             if (!pair) continue;
             const local  = stats.get(pair.localCandidateId);
             const remote = stats.get(pair.remoteCandidateId);
+            let label = null;
             if (local?.candidateType === "relay" || remote?.candidateType === "relay")
                 // Not "p2p": a TURN allocation forwards every byte through our relay
                 // box. Saying "p2p" about a relayed path is a false claim in the one
                 // place a user looks to find out where their file is going.
-                best = best || "relay (turn)";
+                label = "relay (turn)";
             else if (local?.candidateType === "host" && remote?.candidateType === "host")
-                return "direct lan";          // most specific answer wins immediately
+                label = "direct lan";
             else if (local?.candidateType === "srflx" || remote?.candidateType === "srflx")
-                best = best || "p2p (internet)";
+                label = "p2p (internet)";
             // Peer-reflexive: an address learned from an incoming connectivity
             // check. It is a real, non-relayed path — a real-device run
             // had the PC reading host/host while the phone read host/prflx for the
@@ -1813,7 +1826,10 @@ async function derivePathLabel() {
             // unverified, it is direct; we just cannot prove it is a LAN, so this
             // deliberately does not claim "lan".
             else if (local?.candidateType === "prflx" || remote?.candidateType === "prflx")
-                best = best || "direct";
+                label = "direct";
+            // Never return early on a strong answer: another channel may be on the
+            // relay, and that channel is carrying bytes too.
+            best = weakerPathLabel(best, label);
         } catch (_) {}
     }
     // Every channel's transport is dead — whatever is still moving is moving over
