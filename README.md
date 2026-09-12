@@ -157,7 +157,11 @@ addresses are held in memory for rate limiting while a session runs and are
 never logged or kept.
 
 It cannot see the 3 secret digits, the derived keys, message text, file
-contents, or filenames. It logs one line at startup and nothing else.
+contents, or filenames. In normal operation it writes one line at startup (the
+listen banner). It never logs content, pairing codes, keys, filenames or
+addresses; the only other lines it can emit are operational (a ban escalation,
+a slow-receiver disconnect, a sweeper restart), and none of them carries an
+address.
 
 ## Threat model
 

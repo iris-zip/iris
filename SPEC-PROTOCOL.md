@@ -11,10 +11,24 @@ security gain.
 
 - **Sender** = SPAKE2 role **A**; **Receiver** = SPAKE2 role **B**.
   SPAKE2 identities are the single bytes `"A"` and `"B"`.
-- Pairing code: exactly **6 ASCII decimal digits** (space = 10^6), generated
-  server-side from the OS CSPRNG, single-use, burned after 5 room lookups.
+- Pairing code: exactly **9 ASCII decimal digits** = `routing` (6) ‖ `secret` (3).
+  - `routing`: generated **server-side** from the OS CSPRNG, single-use, burned
+    after 5 room lookups. It is the only part of the code the server ever sees
+    (`/ws?code=<routing>`); `is_valid_code` still requires exactly 6 digits.
+  - `secret`: drawn in the **sender's browser** (`crypto.getRandomValues`,
+    rejection-sampled so each digit is uniform over 0–9). It is never sent to
+    the server on any path — it reaches the receiver only through the user
+    (typed), the QR, or the URL fragment, which the client strips on load.
+  - The SPAKE2 password is the full 9-digit string (§4).
 - The relay server forwards opaque frames only; it contributes no cryptographic
-  material and never sees any secret.
+  material. It knows `routing` (it issued it) and **cannot complete SPAKE2
+  without `secret`**: a relay impersonating a peer gets one password guess per
+  join attempt (10^-3), and a wrong guess fails key confirmation on **both**
+  sides (§4, "Wrong code"). This is the residual a relay operator retains.
+  *Changed from an earlier design: before this, the 6 server-minted
+  digits were the whole password, so a hostile relay held it. No certified
+  primitive, message size, transcript or key-schedule step changed — only the
+  password's composition.*
 
 ## 2. Handshake message sequence
 
@@ -55,7 +69,8 @@ T = xPkA ‖ xPkB ‖ mlEk ‖ mlCt          (32 + 32 + 1184 + 1088 = 2336 bytes
 ## 4. Key schedule
 
 ```
-K_PAKE = SPAKE2-Ed25519(code, idA="A", idB="B")        (64 bytes)
+K_PAKE = SPAKE2-Ed25519(code9, idA="A", idB="B")       (64 bytes)
+         code9 = routing ‖ secret, 9 ASCII digits (§1)
 K_ECDH = X25519(skX, peer xPk)                          (32 bytes; low-order/
          non-contributory peer keys are rejected)
 K_PQ   = ML-KEM-768 shared secret                       (32 bytes)
@@ -82,9 +97,18 @@ the untrusted relay). Mismatch → abort "Wrong code" before any application dat
 Frame format (WS relay and every DataChannel path identical):
 
 ```
-frame = type (1 byte) ‖ nonce (12 bytes) ‖ ChaCha20-Poly1305 ciphertext+tag
-nonce = 0x00 0x00 0x00 ‖ transport (1 byte) ‖ counter (8 bytes, big-endian u64)
+frame     = type (1 byte) ‖ nonce (12 bytes) ‖ ChaCha20-Poly1305 ciphertext+tag
+plaintext = type (1 byte) ‖ payload
+nonce     = 0x00 0x00 0x00 ‖ transport (1 byte) ‖ counter (8 bytes, big-endian u64)
 ```
+
+- **The type is authenticated inside the plaintext.** The
+  leading wire byte is an unauthenticated copy kept so offsets and the frame cap are
+  unchanged; no AAD is used. A receiver MUST decrypt first, MUST reject a frame whose
+  decrypted `plaintext[0]` differs from the wire `type` (or whose plaintext is
+  empty), and MUST dispatch on `plaintext[0]`, never on the wire byte. Before this a
+  relay could re-tag an authenticated frame (e.g. an empty keepalive as "delivered",
+  any frame as BYE) and the peer dispatched it.
 
 - `transport`: `0x00` = WebSocket relay, `0x01 + pathId` = DataChannel path
   (4 paths → `0x01..0x04`). Disjoint nonce spaces per transport/path.
@@ -165,12 +189,21 @@ ConfA = 9dca258d01cea5aed1210da7a2ea2e98
 ConfB = 69069a10a668dcb64682879baf829c5c
 ```
 
-**V4 — record encryption.** Key = `K_s2r` (V2), nonce = transport 0 /
+**V4 — record encryption (primitive).** Key = `K_s2r` (V2), nonce = transport 0 /
 counter 0, plaintext = `"hello beem"`, no AAD:
 
 ```
 nonce     = 000000000000000000000000
 ct ‖ tag  = 724b433ad03ad3d8fb57ebb5a9aec5cf37ec051c1eecd05efa55
+```
+
+**V4b — record encryption as framed (current format).** Same key and nonce,
+plaintext = `0x00 ‖ "hello beem"` (T_TEXT with the type byte inside), no AAD; the
+wire frame is `0x00 ‖ nonce ‖ ct‖tag`:
+
+```
+plaintext = 0068656c6c6f206265656d
+ct ‖ tag  = 1a464a3ad37591dffb5f1ceec1e2b353c9fc7737bd27f51339f4c1
 ```
 
 **V5 — nonce construction.** DC path 2 (transport byte `0x03`), counter 1:
