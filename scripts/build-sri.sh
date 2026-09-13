@@ -76,7 +76,7 @@ grep -q "src=\"qr.js?v=$QR_JS_V\" defer integrity=\"$QR_JS_SRI\"" "$INDEX" || { 
 # on each stylesheet link so a content change mints a new URL and the
 # Cloudflare edge can never serve a stale copy (a recolour once shipped stale
 # because of this).
-# branding.css is excluded: it's a dynamic server route (17.3), not a file.
+# branding.css is excluded: it's a dynamic server route, not a file.
 for css in style.css; do
     CSS_FILE="$CLIENT/$css"
     [[ -f "$CSS_FILE" ]] || { echo "missing: $CSS_FILE" >&2; exit 1; }

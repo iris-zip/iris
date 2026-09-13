@@ -145,11 +145,11 @@ function show(name) {
 }
 
 // ---------------------------------------------------------------------------
-// Phase 28: back-button navigation. Every in-app view change the user
+// Back-button navigation. Every in-app view change the user
 // perceives as "going somewhere" pushes ONE history entry, so Back returns to
 // the landing view instead of leaving the site. Locked guards: the URL is
-// NEVER changed by a push (a pairing code must never enter it — Phase 24 /
-// 23.6b), the state object carries only a view name, and popstate is
+// NEVER changed by a push (a pairing code must never enter it), the state
+// object carries only a view name, and popstate is
 // deliberately NOT treated as a consent gesture. Depth stays at most 1: landing is
 // the base entry, any other view is one pushed entry, and moves between
 // non-landing views retag that entry with replaceState.
@@ -159,7 +159,7 @@ function pushView(name) {
 function replaceView(name) {
     try { history.replaceState({ irisView: name }, "", location.pathname + location.search); } catch (_) {}
 }
-// 28.3: 9 digits must fit the code card on every viewport (TV browsers ship
+// 9 digits must fit the code card on every viewport (TV browsers ship
 // wide monospace fallbacks and their own text inflation). Shrink the font
 // until the row fits; never wrap, never clip a digit.
 function fitCodeCard() {
@@ -179,7 +179,7 @@ window.addEventListener("popstate", (e) => {
     const fatal = $("view-fatal");
     if (fatal && !fatal.hidden) return; // fatal view is a dead end; Back may leave
     if (!views.chat.hidden) {
-        // 28.2: a stray Back never kills a live session outright — re-push the
+        // A stray Back never kills a live session outright — re-push the
         // entry and treat Back as a press of the End-session button: the first
         // press arms the confirm, a second press inside the arm window ends
         // the session (panicVanish -> landing). Back also expresses the
@@ -332,8 +332,8 @@ let ws = null;
 let wsGen = 0; // incremented each openWs() call; stale close handlers self-discard
 let role = null;
 let currentCode = null; // full pairing code (9 digits) — the SPAKE2 password
-let routingCode = null; // Phase 24: the server-minted 6 the relay is allowed to see
-// Phase 26.2: a receiver that arrived through a #code deep link never chose its
+let routingCode = null; // The server-minted 6 the relay is allowed to see
+// A receiver that arrived through a #code deep link never chose its
 // peer — a link in a message can pair it with anyone who holds a live code. The
 // session still opens (the QR flow stays one-tap), but WebRTC signalling is held
 // until the user does something IN the chat, so a tab that is only ever looked
@@ -360,7 +360,7 @@ function grantRtcConsent(e) {
     (async () => { for (const [t, p] of held) { try { await handleRTCSignal(t, p); } catch (_) {} } })();
 }
 
-// Phase 24: the 3 secret digits of the pairing code are drawn HERE, in the
+// The 3 secret digits of the pairing code are drawn HERE, in the
 // sender's browser, and never reach the server — they are the part of the
 // SPAKE2 password a relay cannot know. Only crypto.getRandomValues is allowed
 // for this; Math.random is never acceptable for a secret. Rejection sampling
@@ -396,7 +396,7 @@ let expectedPeerHash = null;  // peer's expected confirmation tag (directional)
 // Receiver: "await-sender-info" -> "await-hash" -> "chat"
 let step = null;
 let aborted = false;
-let sessionEnded = false; // 23.5: deliberate end-of-chat — suppress the late WS close from resurrecting a view
+let sessionEnded = false; // Deliberate end-of-chat — suppress the late WS close from resurrecting a view
 let sendCounterWS = 0n;
 let recvCounterWS = -1n; // per-transport strictly increasing; prevents cross-transport replay drops
 // 16.9.2: one counter pair per DC path; nonce[3] = 1 + pathId keeps the four
@@ -591,7 +591,7 @@ const MAX_FRAME = 200 * 1024;
 // as a file, which is chunked.
 const MAX_TEXT_BYTES = 128 * 1024;
 
-// Phase 26.1: the frame type is authenticated. The AEAD covers `type ‖ payload`;
+// The frame type is authenticated. The AEAD covers `type ‖ payload`;
 // the outer frame[0] is only a wire-visible copy so offsets and sizes stay as
 // SPEC §5 had them. A relay that rewrites byte 0 of a genuine frame (empty
 // keepalive → "file delivered", anything → BYE) now fails `authenticatedPayload`
@@ -689,7 +689,7 @@ $("btn-receive").addEventListener("click", () => {
     clearRateBanners();
     $("code-input").value = "";
     show("receiver");
-    pushView("receiver"); // 28.1: Back returns to landing
+    pushView("receiver"); // Back returns to landing
     $("code-input").focus();
 });
 
@@ -699,12 +699,12 @@ $("code-input").addEventListener("keydown", (e) => {
 });
 $("code-input").addEventListener("input", () => {
     const el = $("code-input");
-    const digits = el.value.replace(/\D/g, "").slice(0, 9); // 28.3: never hold >9 digits
+    const digits = el.value.replace(/\D/g, "").slice(0, 9); // Never hold >9 digits
     if (digits !== el.value) el.value = digits; // "123 456 789" pastes survive
     if (digits.length === 9) joinAsReceiver();
 });
 
-// 26.2: consent is granted only by a gesture that expresses intent to talk —
+// Consent is granted only by a gesture that expresses intent to talk —
 // tapping the composer, typing into it, pasting, or dropping a file (capture
 // phase, so it fires before any handler below acts on it). Raw keydown or
 // pointerdown anywhere in the view must NOT count: Tab/Escape on the way to
@@ -797,7 +797,7 @@ async function startSender() {
         if (!res.ok) throw new Error(`HTTP ${res.status}`);
         const { code } = await res.json();
         role = "sender";
-        // Phase 24: the server's 6 digits route the room; 3 more digits drawn
+        // The server's 6 digits route the room; 3 more digits drawn
         // here never leave this browser except via the peer's eyes/QR. All 9
         // are the PAKE password, so the relay can't complete SPAKE2 on its own.
         routingCode = code;
@@ -809,7 +809,7 @@ async function startSender() {
             sp.textContent = digit;
             bc.appendChild(sp);
         }
-        // 23.6: QR of the join URL, drawn by the vendored local encoder (qr.js).
+        // QR of the join URL, drawn by the vendored local encoder (qr.js).
         // Degrades silently if the script didn't load; the typed code still works.
         const qrEl = $("qr-code");
         qrEl.innerHTML = "";
@@ -824,8 +824,8 @@ async function startSender() {
         }
         setWaitMsg("Waiting for peer\u2026", "warn");
         show("sender");
-        pushView("sender"); // 28.1: Back returns to landing (and kills the room)
-        fitCodeCard(); // 28.3: after show() — a hidden element measures 0
+        pushView("sender"); // Back returns to landing (and kills the room)
+        fitCodeCard(); // After show() — a hidden element measures 0
         acquireWakeLock();
         openWs(routingCode, currentCode);
     } catch (e) {
@@ -848,12 +848,12 @@ function joinAsReceiver() {
     $("receiver-error").textContent = "";
     role = "receiver";
     currentCode = code;
-    routingCode = code.slice(0, 6); // Phase 24: only these 6 go to the server
-    rtcConsent = true; heldRtcSignals = []; // 26.2: a typed/tapped join chose its peer
+    routingCode = code.slice(0, 6); // Only these 6 go to the server
+    rtcConsent = true; heldRtcSignals = []; // A typed/tapped join chose its peer
     openWs(routingCode, code);
 }
 
-// Phase 24: `routing` is the only thing the server ever sees (?code=); `password`
+// `routing` is the only thing the server ever sees (?code=); `password`
 // is the full 9-digit pairing code and goes only into SPAKE2. On resume the
 // handshake state is already in memory, so `password` is unused (pass null).
 function openWs(routing, password, resume = false) {
@@ -861,7 +861,7 @@ function openWs(routing, password, resume = false) {
     // resume retries. The server's per-IP ladder counts them all, and in
     // real-device testing a phone made 6 in one 60 s window — enough to trip a cooldown —
     // while our own counter saw only 4, because the two initial joins were not
-    // recorded. (There were two because the first hit a stale code and got 4005.)
+    // recorded.
     // The single spare slot we reserve for "an unrelated join" was never going to
     // cover that. Initial joins CONSUME budget but are never blocked by it: a user
     // pairing must not be refused by our own bookkeeping.
@@ -884,7 +884,7 @@ function openWs(routing, password, resume = false) {
     }
     preCloseCode = 0;
     preCloseReason = "";
-    sessionEnded = false; // 23.5: fresh connection — re-arm the close handler
+    sessionEnded = false; // Fresh connection — re-arm the close handler
 
     const proto = location.protocol === "https:" ? "wss" : "ws";
     // present the resume token (if we have one) so a reconnect after a
@@ -1003,7 +1003,7 @@ function openWs(routing, password, resume = false) {
                 console.warn("[iris] decrypt failed \u2014 frame rejected"); appendSystemMsg("(a message was ignored for your safety)");
                 return;
             }
-            // 26.1: the wire type byte is outside the tag — only pt[0] is trusted.
+            // The wire type byte is outside the tag — only pt[0] is trusted.
             const body = authenticatedPayload(type, pt);
             if (!body) { console.warn("[iris] frame type mismatch \u2014 frame rejected"); appendSystemMsg("(a message was ignored for your safety)"); return; }
             recvCounterWS = incomingCounter;
@@ -1107,7 +1107,7 @@ function openWs(routing, password, resume = false) {
     ws.addEventListener("close", (ev) => {
         if (wsGen !== myGen) return; // stale handler from a replaced WS — ignore
         if (aborted) return;
-        if (sessionEnded) return; // 23.5: chat already ended deliberately — ignore the late close
+        if (sessionEnded) return; // Chat already ended deliberately — ignore the late close
         // 15.10b If the real close frame was stripped (CF Tunnel → 1006), fall back
         // to the text marker the server sent just before closing.
         const rawCode = ev && ev.code;
@@ -1238,13 +1238,13 @@ function enterChat() {
     disarmVanish(); // a new session must never open with the old one's confirm armed
     setChatChip("ok", "Connected");
     show("chat");
-    // 28.1: keep history depth at 1. A typed/QR-view join already pushed a
+    // Keep history depth at 1. A typed/QR-view join already pushed a
     // sender/receiver entry — retag it as the chat entry; a deep-link join
     // pushed nothing (its hash was scrubbed via replaceState), so push here to
     // give the Back guard an entry to hold.
     if (history.state && history.state.irisView) replaceView("chat");
     else pushView("chat");
-    // 26.2: never auto-focus the composer while consent is withheld — a
+    // Never auto-focus the composer while consent is withheld — a
     // focused textarea turns reflex keystrokes into consent gestures.
     if (rtcConsent) $("chat-input").focus();
     startWsKeepalive();
@@ -1441,8 +1441,8 @@ function attemptResume() {
 // 15.9 Peer gone / session ended: disable inputs, flip the header chip to err tone.
 function endChatSession() {
     step = null;
-    sessionEnded = true; // 23.5: mark deliberate end so the late WS close doesn't resurrect a view
-    heldRtcSignals = []; rtcConsent = true; // 26.2: held peer SDP (its IP) must not outlive the session
+    sessionEnded = true; // Mark deliberate end so the late WS close doesn't resurrect a view
+    heldRtcSignals = []; rtcConsent = true; // Held peer SDP (its IP) must not outlive the session
     $("code-input").value = "";
     useRTC = false;
     drainAckWaiters(); // unblock any sendFile/handleFileNack loop waiting on ACK
@@ -1520,7 +1520,7 @@ function panicVanish() {
 }
 function _doVanish() {
     aborted = true;
-    sessionEnded = false; // 23.5: back to landing — re-arm for the next session
+    sessionEnded = false; // Back to landing — re-arm for the next session
     step = null;
     useRTC = false;
     drainAckWaiters();
@@ -1532,7 +1532,7 @@ function _doVanish() {
     stopPeerSilenceWatch(); // no watchdog may outlive the session
     stopPathLabelWatch();
     releaseWakeLock();
-    // 23.4: plaintext marker so the server can skip resume-grace and tear the
+    // Plaintext marker so the server can skip resume-grace and tear the
     // room down immediately — T_BYE above is best-effort (sendPayload silently
     // no-ops when the WS isn't OPEN), this is the server-authoritative backstop.
     if (ws && ws.readyState === WebSocket.OPEN) {
@@ -1554,8 +1554,8 @@ function _doVanish() {
     recvCountersDC = [-1n, -1n, -1n, -1n];
     recvMasksDC = [0n, 0n, 0n, 0n];
     role = currentCode = routingCode = null;
-    rtcConsent = true; heldRtcSignals = []; // 26.2: a fresh session starts unheld
-    $("qr-code").innerHTML = ""; // 23.6: drop the stale code's QR before the next session
+    rtcConsent = true; heldRtcSignals = []; // A fresh session starts unheld
+    $("qr-code").innerHTML = ""; // Drop the stale code's QR before the next session
     $("chat-log").innerHTML = "";
     $("chat-input").value = "";
     $("file-status").textContent = "";
@@ -1903,7 +1903,7 @@ function wireDataChannel(path) {
         if (!dcReplayFresh(pid, dcCounter)) return;
         let pt;
         try { pt = decrypt(recvKey, nonce, buf.slice(13)); } catch (_) { return; }
-        const body = authenticatedPayload(type, pt); // 26.1: trust pt[0], not buf[0]
+        const body = authenticatedPayload(type, pt); // Trust pt[0], not buf[0]
         if (!body) return;
         dcReplayMark(pid, dcCounter); // authenticated — only now may it move the window
         // Silent on mismatch (unlike WS): a DC peer already holds the key and could
@@ -2232,7 +2232,7 @@ function handleChatPayload(type, pt) {
     if (type === T_FILE_END) { handleFileEnd(pt); return; }
     if (type === T_RTC_OFFER || type === T_RTC_ANSWER || type === T_RTC_ICE) {
         if (!rtcConsent) {
-            // 26.2: hold, don't drop — the peer's offers are replayed on the first
+            // Hold, don't drop — the peer's offers are replayed on the first
             // gesture. `pt` is a view into the frame buffer; keep our own copy.
             if (pt.length <= HELD_RTC_MAX_BYTES && heldRtcSignals.length < HELD_RTC_MAX) {
                 heldRtcSignals.push([type, pt.slice()]);
@@ -2395,7 +2395,7 @@ function fmtBytes(n) {
 
 // 23.3 — MIME is never sent on the wire; infer preview eligibility from the
 // filename extension alone (display-only, no effect on transfer).
-// Phase 25.2: the peer picks the filename, the browser saves under it. The
+// The peer picks the filename, the browser saves under it. The
 // name is only ever DISPLAYED via textContent (no markup risk), but
 // `a.download` hands it to the OS: a right-to-left override (U+202E) makes
 // "photo\u202Egpj.exe" render as "photoexe.jpg", and control/format characters
@@ -2455,7 +2455,7 @@ function appendFileRow(name, sizeBytes, direction, onCancel) {
     nameEl.className = "bm-file-name";
     // 16.8.1 — direction used to be a ↑/↓ glyph; it now reads from the side the
     // card sits on and its surface colour, exactly as the message bubbles do.
-    nameEl.textContent = displayName(name); // 25.2: no bidi/invisible spoof in the UI
+    nameEl.textContent = displayName(name); // No bidi/invisible spoof in the UI
     nameEl.title = displayName(name);
 
     const icon = document.createElement("span");
@@ -3087,7 +3087,7 @@ function handleFileHdr(pt) {
     const size = Number(v.getBigUint64(1, false));
     const nameLen = v.getUint16(9, false);
     if (pt.length !== 11 + nameLen) { appendSystemMsg("(bad file header)"); return; }
-    // 21.1: never trust the sender's declared size — a modified client could
+    // Never trust the sender's declared size — a modified client could
     // announce anything and OOM this tab during assembly. Mirror of the
     // sender-side pick check; honest senders can't hit this branch.
     if (size > MAX_FILE_SIZE) {
@@ -3149,7 +3149,7 @@ function handleFileChunk(pt) {
         return;
     }
     const idx = new DataView(pt.buffer, pt.byteOffset, pt.byteLength).getUint32(1, false);
-    // 21.1: out-of-range index from a hostile sender — sparse parts[] would
+    // Out-of-range index from a hostile sender — sparse parts[] would
     // balloon to idx entries on assembly. No ACK: honest senders never send one.
     if (idx >= recvFile.totalChunks) return;
     // A chunk can never exceed CHUNK_SIZE — the sender slices to exactly that, so
@@ -3322,7 +3322,7 @@ function endGraceMs(f) {
     // "Received \u00b7 <size>" that completeFileRow just wrote.
     const link = document.createElement("a");
     link.href = url;
-    link.download = safeDownloadName(f.name); // 25.2: peer-chosen, sanitised for the OS
+    link.download = safeDownloadName(f.name); // Peer-chosen, sanitised for the OS
     link.className = "bm-file-btn";
     link.title = `Download ${displayName(f.name)}`;
     link.setAttribute("aria-label", `Download ${displayName(f.name)}`);
@@ -3529,7 +3529,7 @@ async function handleFileNack(pt) {
 }
 
 
-// 23.6b: deep-link join from a scanned QR (#<code>). MUST stay at the very end
+// Deep-link join from a scanned QR (#<code>). MUST stay at the very end
 // of the module: the join path reads `let` bindings declared throughout the
 // file (e.g. wsChunksInFlight), and running it mid-module hits the temporal
 // dead zone — the error is then swallowed by the event loop and the join
@@ -3548,7 +3548,7 @@ if (hashMatch) {
     show("receiver");
     $("code-input").value = hashMatch[1];
     joinAsReceiver();
-    // 26.2: AFTER the join (which resets the flag) — this user did not pick the
+    // AFTER the join (which resets the flag) — this user did not pick the
     // peer, so signalling is held until the first gesture; see grantRtcConsent.
     withholdRtcUntilGesture();
 }

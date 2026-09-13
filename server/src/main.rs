@@ -267,7 +267,7 @@ const HEARTBEAT_INTERVAL_SECS: u64 = 15;
 const HEARTBEAT_TICK_SECS: u64 = 5;
 const PINGS_EVERY_N_TICKS: u64 = HEARTBEAT_INTERVAL_SECS / HEARTBEAT_TICK_SECS;
 // Silence past this ends the connection. Deliberately keyed on ANY inbound frame,
-// not on Pong alone: cloudflared mangles WS control frames here (see 15.10b), so a
+// not on Pong alone: cloudflared mangles WS control frames here, so a
 // Pong-only timeout could reap a healthy client behind the tunnel. The client's own
 // 10 s T_KEEPALIVE is therefore the primary liveness signal and our Ping is the
 // backup — 45 s clears four client keepalives and three of our pings. The client
@@ -667,7 +667,7 @@ async fn main() {
         .and_then(|s| s.parse().ok()).unwrap_or(MAX_RELAY_BYTES);
 
     // 17.4 Optional stderr audit log for compliance. Off by default; no content, no
-    // codes, no raw IPs — fingerprint only (see ip_fingerprint, reused from 15.3).
+    // codes, no raw IPs — fingerprint only (see ip_fingerprint).
     let audit = std::env::var("BEEM_AUDIT").ok().as_deref() == Some("1");
 
     // 17.3 optional self-host branding: unset by default, no visible change.
@@ -1876,7 +1876,7 @@ async fn pair(mut socket: WebSocket, code: String, resume_token: Option<String>,
                 // Any inbound frame proves the far end is still there.
                 last_seen = tokio::time::Instant::now();
                 match incoming {
-                    // 23.4: only a pair member may deliberately vanish. An
+                    // Only a pair member may deliberately vanish. An
                     // observer's BEEM-LEAVE must NOT evict the pair — gated like the
                     // post-loop peer-left broadcast. A non-member marker falls through
                     // to the relay arm below, where it is dropped (not a member).

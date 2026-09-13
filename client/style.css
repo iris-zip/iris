@@ -574,7 +574,7 @@ img, svg { display: block; max-width: 100%; }
 #big-code {
   font-family: var(--font-mono);
   font-size: clamp(1.5rem, 6.4vw, 3.25rem);
-  /* 28.3: TV/4K browsers inflate text (text-size-adjust) and their wide mono
+  /* TV/4K browsers inflate text (text-size-adjust) and their wide mono
      fallbacks overflowed the card with 9 digits; pin adjustment and let the
      JS fit pass (fitCodeCard) shrink the font to the card, never wrap/clip. */
   -webkit-text-size-adjust: 100%;

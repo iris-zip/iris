@@ -1,4 +1,4 @@
-# Iris — self-host image (Phase 17.1)
+# Iris — self-host image
 #
 # Three stages, mirroring the exact order Makefile's `deploy` target encodes
 # (wasm -> sri -> server), because the SRI hashes stamped into app.js /
