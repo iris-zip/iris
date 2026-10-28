@@ -1115,6 +1115,18 @@ function openWs(routing, password, resume = false) {
                 endChatSession();
                 return;
             }
+            // A token-holding member refused with CODE_MISSING is told something final:
+            // the room is gone, nobody is left in it, or the resume cap is spent —
+            // retrying can never succeed. The server holds a cleanly-closed peer's
+            // room for RESUME_GRACE_SECS, shorter than our own window, so this ends
+            // the session when the server does instead of retrying into a closed
+            // room. Without a token, CODE_MISSING can come from a live room that
+            // demands one, so that case keeps retrying.
+            if (code === CLOSE.CODE_MISSING && resumeToken) {
+                appendSystemMsg("(this session has ended \u2014 start a new one to keep going)");
+                endChatSession();
+                return;
+            }
             // Anything else during chat (1006 from OS-killed TCP when the tab is
             // backgrounded for a file picker) — try to silently resume.
             attemptResume();
@@ -2795,6 +2807,7 @@ async function sendFile(file) {
             if (wsChunksInFlight >= ACK_WINDOW && !sendCancelled) {
                 await new Promise(r => ackResolvers.push(r));
             }
+            await wsBackpressure();
         }
         if (gone()) return;
         if (sendCancelled) break;
@@ -2850,6 +2863,19 @@ async function sendFile(file) {
 const ACK_WINDOW = 32; // max chunks in flight over WS relay (~4 MB)
 let wsChunksInFlight = 0;
 let ackResolvers = []; // queue of resolve functions waiting for an ACK
+
+// The ACK window paces the relay by what the receiver reports; this paces it by
+// what the socket has actually sent. An honest transfer never has more than the
+// window (~4 MB) queued, so the cap never binds — it only guarantees the browser's
+// send queue stays bounded whatever ACKs arrive, so the tab never holds a whole
+// file in memory. Returns as soon as the session, socket or transfer is gone.
+const WS_BUFFER_CAP = 2 * ACK_WINDOW * CHUNK_SIZE;
+async function wsBackpressure() {
+    while (ws && ws.readyState === WebSocket.OPEN && ws.bufferedAmount > WS_BUFFER_CAP
+           && !sendCancelled && step === "chat") {
+        await new Promise(r => setTimeout(r, 50));
+    }
+}
 
 function ackReceived() {
     wsChunksInFlight = Math.max(0, wsChunksInFlight - 1);
@@ -3438,6 +3464,7 @@ async function handleFileNack(pt) {
             if (wsChunksInFlight >= ACK_WINDOW && !sendCancelled) {
                 await new Promise(r => ackResolvers.push(r));
             }
+            await wsBackpressure();
         }
         if (dead()) return;
     }

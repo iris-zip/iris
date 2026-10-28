@@ -17,6 +17,9 @@ two peers on different major versions cannot talk to each other.
 - `HASHES.md` tells you how to find the commit it belongs to, rather than
   naming one.
 - Source comments describe what the code does today.
+- A device that comes back after its session has ended on the server is told
+  so at once, instead of retrying until its reconnect window runs out.
+- Sending over the server relay keeps the browser's send queue bounded.
 
 ## 1.0.2 — 2026-09-05
 
