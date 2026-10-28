@@ -15,7 +15,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 RUN rustup target add wasm32-unknown-unknown
 
 # Pinned, checksum-verified wasm-pack install (same version + hash as
-# .github/workflows/test.yml — avoids curl|sh per 16.5.1).
+# .github/workflows/test.yml — avoids curl|sh).
 RUN WP_VERSION=v0.14.0 && \
     WP_SHA256=278a8d668085821f4d1a637bd864f1713f872b0ae3a118c77562a308c0abfe8d && \
     WP_DIR=wasm-pack-${WP_VERSION}-x86_64-unknown-linux-musl && \

@@ -67,7 +67,7 @@ enum RelayBudget {
 }
 
 // Pure, so it is unit-testable without a socket or a room — same shape and reasoning
-// as is_pair_member / is_resume_join above. `limit == 0` disables the ceiling, which is
+// as is_resume_join and resume_admitted below. `limit == 0` disables the ceiling, which is
 // the escape hatch for a self-hoster who is paying for their own bandwidth.
 fn relay_budget_state(total: u64, limit: u64, warned: bool) -> RelayBudget {
     if limit == 0 {
@@ -87,25 +87,21 @@ const MAX_WS_FRAME: usize = 200 * 1024; // 128KB chunk + 33B crypto overhead + m
 // hold up to MAX_WS_FRAME. A slow-draining subscriber (one that keeps the socket alive
 // with keepalives but stops accepting writes) pins every full slot in memory until it
 // either drains or is caught by the Lagged check below — so the ring's capacity times
-// MAX_WS_FRAME is the real per-room memory ceiling, not a message count. At the old
-// capacity of 2048 that ceiling was ~400 MiB per room, ~1.6 GiB per address across the
-// 4 rooms MAX_CONCURRENT_PER_IP allows — attacker-affordable and unbounded by anything
-// else in the file. 256 slots caps a room at ~51 MiB (~205 MiB/address): the WS relay
-// lane measured 4.3-4.7 MB/s on a real deployment, so this still
-// buffers several seconds of a real, fully-drained bulk relay transfer's jitter — the
-// legitimate case this must not break — while cutting the attacker's affordable pin by
-// roughly 8x. Lagged subscribers are still closed exactly as before; this only tightens
-// how much has to accumulate before that happens.
+// MAX_WS_FRAME is the real per-room memory ceiling, not a message count. 256 slots
+// caps a room at ~51 MiB (~205 MiB per address across the rooms MAX_CONCURRENT_PER_IP
+// allows), which still buffers several seconds of a fully-drained bulk relay
+// transfer's jitter — the legitimate case this must not break. Lagged subscribers
+// are closed.
 const ROOM_CHANNEL_CAPACITY: usize = 256;
 
-// 15.2 + 15.11 Per-IP WS connect rate limit.
+// Per-IP WS connect rate limit.
 // Cooldown softened to 30s (was 300s): per-IP is volumetric-abuse defense only.
 // Real brute-force defense is now per-code attempt cap (MAX_CODE_ATTEMPTS below).
 const WS_MAX_ATTEMPTS_PER_WINDOW: usize = 5;
 const WS_WINDOW_SECS: u64 = 60;
 const WS_COOLDOWN_SECS: u64 = 30;
 
-// 15.11 Per-code brute-force defense. Once a live code has been connected to
+// Per-code brute-force defense. Once a live code has been connected to
 // this many times, it is invalidated regardless of source IP — stops botnet
 // enumeration dead. Normal flow uses 2 attempts (sender + receiver); 5 leaves
 // room for legit reconnects (page refresh, tab close + retry) without burning
@@ -133,8 +129,7 @@ fn is_resume_join(attempt_before: u32, receiver_count: usize) -> bool {
 // plus a favourable headcount must never be enough to gain membership and
 // evict the real peer. Pure and named so the one predicate backs both the
 // branch that decides how a join is counted AND the later grant of
-// membership itself; those must never be allowed to disagree with each
-// other, which is exactly how the original bug shape worked.
+// membership itself; those must never be allowed to disagree with each other.
 fn resume_admitted(both_slots_minted: bool, attempt_before: u32, receiver_count: usize) -> bool {
     !both_slots_minted && is_resume_join(attempt_before, receiver_count)
 }
@@ -148,12 +143,11 @@ fn resume_admitted(both_slots_minted: bool, attempt_before: u32, receiver_count:
 // Observers may READ the relayed (encrypted) frames but must never broadcast INTO the
 // room: without this gate an observer that knows the code could send `BEEM-LEAVE` to
 // tear the live session down, or relay plaintext UI markers (BEEM-GRACE/BEEM-BACK/
-// BEEM-CLOSE) that the peers parse before the AEAD path — or, per the headcount-vs-token gap above, walk in as a
-// full member on nothing but a headcount and evict the real peer. Membership is
-// exactly `attempt_before < 2 || resume_admitted(..)`, so relay/eviction rights track
-// the resume classifier — this is called out inline at the `pair()` call site rather
-// than its own function, since a second independent evaluation of the same question
-// is exactly how that headcount-vs-token bug happened in the first place.
+// BEEM-CLOSE) that the peers parse before the AEAD path, and a headcount alone never
+// makes a full member. Membership is exactly `attempt_before < 2 || resume_admitted(..)`,
+// so relay/eviction rights track the resume classifier — it is evaluated inline at
+// the `pair()` call site rather than in its own function, so the same question is
+// never answered twice in two places.
 
 // Constant-time byte comparison. A 128-bit token crossing a network isn't
 // realistically timing-attackable, but this is a membership gate — writing it
@@ -188,31 +182,20 @@ fn slot_index(slots: &[MemberSlot], presented: Option<&str>) -> Option<usize> {
     slots.iter().position(|s| ct_eq(&s.token, p))
 }
 
-// Room lifetime. These two predicates were, until this was fixed, one rule
-// written twice in two places that disagreed, and the disagreement was a
-// long-standing reliability bug: `pair()` refused any join past `expires_at`,
-// while the sweeper deliberately RETAINED such a
-// room whenever a live pair was still using it. Retention is not joinability. A
-// room was kept alive precisely so a peer could come back to it, and then the
-// door was held shut.
+// Room lifetime: retention and joinability are two different questions. The
+// sweeper RETAINS a room past `expires_at` while a live pair is still using it,
+// precisely so a peer can come back to it — so `pair()` must let that peer in.
 //
 // `expires_at` is only ever written at room creation (+CODE_TTL_SECS) and at a
-// peer's grace exit (+RESUME_GRACE_SECS+10). A healthy session never refreshes
-// it — so EVERY reconnect more than 60 s into a session was answered with
-// CLOSE_CODE_MISSING. Observed in practice: rejoin at 126 s refused with 4005,
-// the same peer accepted at 151 s only because a reap at 134 s happened to
-// refresh the clock.
+// peer's grace exit (+RESUME_GRACE_SECS+10); a healthy session never refreshes it.
+// CODE_TTL_SECS bounds how long an UNCLAIMED code is guessable, not how long a
+// session may last.
 //
-// CODE_TTL_SECS was doing two jobs at once. Its real one is bounding how long an
-// UNCLAIMED code is guessable; killing live sessions was never the intent.
-//
-// The fix is deliberately STRICTER than simply making `pair()` match the sweeper.
 // Past the TTL a room is **token-only**: the code alone stops being sufficient,
-// and only a holder of the 128-bit membership token gets in. So the
-// brute-force window narrows rather than widens — a guesser who lands on a live
-// code after 60 s can no longer spend that room's MAX_CODE_ATTEMPTS budget.
+// and only a holder of the 128-bit membership token gets in. So a guesser who
+// lands on a live code after 60 s cannot spend that room's MAX_CODE_ATTEMPTS budget.
 //
-// Relationship between the two (pinned by TEST-S-024): joinable is a strict
+// Relationship between the two (pinned by a unit test below): joinable is a strict
 // SUBSET of retained. The sweeper cannot check tokens — it has no presented
 // credential at sweep time — so it must keep anything a token holder could still
 // return to. That asymmetry is why these are two functions and not one.
@@ -250,20 +233,14 @@ fn burn_room_on_resume_cap(resumes: u32, receiver_count: usize) -> bool {
     resumes > MAX_RESUME_JOINS && receiver_count == 0
 }
 
-// Liveness. Nothing in this server previously noticed a connection that died
-// without a FIN. A phone leaving WiFi blackholes its TCP: `socket.recv()` never
-// returns, the task parks until MAX_SESSION_SECS (1 h), no peer-left is ever
-// broadcast, and the survivor's UI keeps claiming "Connected" over a dead session.
-// Confirmed in practice. tungstenite auto-answers an inbound Ping but never
-// generates heartbeats of its own, so the server must drive them.
+// Liveness. A connection can die without a FIN: a phone leaving WiFi blackholes its
+// TCP, so `socket.recv()` never returns and nothing would ever tell the survivor.
+// tungstenite auto-answers an inbound Ping but never generates heartbeats of its
+// own, so the server drives them.
 const HEARTBEAT_INTERVAL_SECS: u64 = 15;
-// The silence CHECK runs on its own, faster tick. It used to share the ping's
-// cadence, which made the reap resolution 15 s: real silence starts at an
-// arbitrary phase against the tick, so a 45 s timeout actually fired anywhere in
-// 45–60 s. Measured at 58.3 s in practice against a constant that says 45 —
-// the same class of measurement bias seen elsewhere in this codebase, and invisible to the prober because it measures
-// the aligned case (silence from t≈0, where 45 lands exactly on a tick).
-// 5 s narrows the real range to 45–50 s. The ping stays at 15 s on the wire.
+// The silence CHECK runs on its own, faster tick: real silence starts at an
+// arbitrary phase against the tick, so the tick is the reap's resolution. At 5 s a
+// 45 s timeout fires within 45–50 s. The ping stays at 15 s on the wire.
 const HEARTBEAT_TICK_SECS: u64 = 5;
 const PINGS_EVERY_N_TICKS: u64 = HEARTBEAT_INTERVAL_SECS / HEARTBEAT_TICK_SECS;
 // Silence past this ends the connection. Deliberately keyed on ANY inbound frame,
@@ -285,27 +262,19 @@ fn peer_is_silent(receiver_count: usize, silent_for: Duration) -> bool {
     receiver_count >= 2 && silent_for > Duration::from_secs(PEER_SILENCE_TIMEOUT_SECS)
 }
 
-// Follow-up to the liveness fix above, confirmed in practice: the heartbeat above is worthless unless
-// every write is bounded, and none of them were.
+// The heartbeat above only works if every write is bounded too.
 //
 // `tokio::select!` polls its branches only while it is choosing one. Once a branch
 // is taken, an `.await` inside that branch's BODY runs with select suspended — so
-// `socket.send(msg).await` in the relay arm parked the whole loop, heartbeat arm
-// included. On a blackholed socket (phone walks off WiFi, no FIN) the kernel send
-// buffer fills and that await never completes: the task never exits, never
-// broadcasts, and stays subscribed forever, holding `receiver_count` up.
-//
-// Observed directly: a rejoin logged `rc=3` (survivor + zombie
-// + returning peer) and then **no exit line at all** — the zombie was still parked
-// when the whole transfer finished. Note this only became reachable once transfers were made to
-// survive the switch: a surviving transfer means the survivor keeps
-// ACKing, so the zombie always has a frame to relay into a socket nobody drains.
+// an unbounded `socket.send(msg).await` in the relay arm would park the whole loop,
+// heartbeat arm included. On a blackholed socket (phone walks off WiFi, no FIN) the
+// kernel send buffer fills and that await never completes. Every write therefore
+// goes through send_bounded.
 //
 // Its own value, NOT an alias of PEER_SILENCE_TIMEOUT_SECS. They happen to be
 // equal today and they answer different questions — "will not send us bytes" vs
-// "will not accept ours". Aliasing them made it impossible to tell in practice which
-// one had ended a connection, and it means tuning either one silently moves the
-// other. Same number, independent knob.
+// "will not accept ours" — so tuning one must not silently move the other. Same
+// number, independent knob.
 //
 // 45 s reasoning: a peer that has not accepted a byte in 45 s is exactly as gone
 // as one that has not sent one, and a merely slow client gets RESUME_GRACE_SECS
@@ -333,7 +302,7 @@ const MAX_CONCURRENT_PER_IP: u32 = 8;
 // imposter who snipes the slot cannot produce valid ciphertext.
 const RESUME_GRACE_SECS: u64 = 30;
 
-// 15.3 Tiered-ban escalation.
+// Tiered-ban escalation.
 const BAN_COOLDOWN_WINDOW_SECS: u64 = 3600; // 1 h — 3 cooldowns here → 30-min ban
 const BAN_COOLDOWN_THRESHOLD: usize = 3;
 const BAN_MEDIUM_SECS: u64 = 1800; // 30 min
@@ -341,7 +310,7 @@ const BAN_MEDIUM_WINDOW_SECS: u64 = 86_400; // 24 h — 3 × 30-min bans here �
 const BAN_MEDIUM_THRESHOLD: usize = 3;
 const BAN_HARD_SECS: u64 = 86_400; // 24 h
 
-// 15.10 App-defined close codes (RFC 6455 4xxx range). Reason strings can be
+// App-defined close codes (RFC 6455 4xxx range). Reason strings can be
 // stripped by intermediaries (notably Cloudflare Tunnel), but numeric close
 // codes always survive — so the client dispatches UI on these, not the reason.
 // The reason is still set when useful (e.g. remaining seconds for cooldown),
@@ -353,11 +322,9 @@ const CLOSE_CODE_FORMAT: u16     = 4004;
 const CLOSE_CODE_MISSING: u16    = 4005;
 const CLOSE_SESSION_TIMEOUT: u16 = 4006;
 const CLOSE_PEER_LEFT: u16       = 4007;
-// This connection is not a member of the pair. Previously a non-member
-// was ADMITTED and then silently muted — it could read the relay but every frame
-// it sent was dropped, so it sat there believing it was connected. That is the
-// same lie the whole liveness stage exists to remove, and it was the original
-// symptom: a peer that reconnected "came back muted".
+// This connection is not a member of the pair. It is refused outright rather than
+// admitted and silently muted, so a client is never left believing it is connected
+// when nothing it sends will be relayed.
 //
 // Closing instead is strictly better in all three directions: a real member whose
 // membership could not be proven now gets a visible failure it can act on rather
@@ -378,7 +345,7 @@ const CLOSE_RELAY_BUDGET: u16    = 4009;
 // because nothing was charged — the client is being told "not you", not "not now".
 const CLOSE_BAD_ORIGIN: u16      = 4010;
 
-// 15.10b Cloudflare Tunnel drops WS close frames entirely — the client sees code 1006
+// Cloudflare Tunnel drops WS close frames entirely — the client sees code 1006
 // ("abnormal closure") instead of our 4001..4007. Workaround: send a plain Text frame
 // ("BEEM-CLOSE:<code>:<reason>") the client caches and uses as a fallback when ev.code
 // is 1006. cloudflared also drops trailing frames if the server closes the TCP stream
@@ -402,7 +369,7 @@ async fn send_close_signal(socket: &mut WebSocket, code: u16, reason: &str) {
     .await;
 }
 
-// 23.4 Client sends this plaintext marker (mirrors 15.10b's BEEM-CLOSE
+// Client sends this plaintext marker (mirrors the BEEM-CLOSE
 // workaround — plain Text frames survive Cloudflare Tunnel where native WS
 // close semantics are unreliable) just before it closes on panic-vanish, so
 // the server can skip the resume-grace and tear the room down immediately
@@ -411,7 +378,7 @@ fn is_leave_marker(t: &str) -> bool {
     t == "BEEM-LEAVE"
 }
 
-// 25.3 An honest client puts exactly two kinds of frame on the wire: AEAD
+// An honest client puts exactly two kinds of frame on the wire: AEAD
 // binary frames, and the one plaintext `BEEM-LEAVE` marker (consumed by the
 // rx arm above the relay arm, never forwarded). Every other Text frame the
 // relay sees from a pair member is a modified client trying to speak in the
@@ -428,7 +395,7 @@ fn relayable_from_member(msg: &Message) -> bool {
 struct Room {
     tx: broadcast::Sender<(u64, Message)>,
     expires_at: Instant,
-    // 15.11 Per-code attempt counter; incremented on every successful room
+    // Per-code attempt counter; incremented on every successful room
     // lookup in `pair()`. Once it reaches MAX_CODE_ATTEMPTS the room is removed.
     attempts: u32,
     // Mobile-resume joins: every Android
@@ -459,16 +426,14 @@ struct Room {
 // discover, at its own exit, that its slot has ALREADY been refilled by the
 // same member returning on a new socket.
 //
-// Observed in practice: a phone that left WiFi rejoined on cellular at
-// ~10 s, but the zombie's heartbeat did not reap it until ~45 s. The zombie's
-// exit then broadcast BEEM-GRACE room-wide, so the returned phone was told its
-// own peer had been lost — while sitting in a working session. Counting is
-// deliberately per-slot and not per-room: with a room-wide epoch, B resuming
-// once would silence the grace for A's later genuine departure, and the
-// survivor would never be told. That is a far worse bug than the banner.
+// A phone that leaves WiFi can rejoin on cellular well before its old socket is
+// reaped; when that old socket finally exits it must not announce a grace window
+// for a member who is already back. Counting is deliberately per-slot and not
+// per-room: with a room-wide epoch, B resuming once would silence the grace for
+// A's later genuine departure, and the survivor would never be told.
 //
 // Note this is NOT the receiver_count trick — a count can be inflated by any
-// observer subscribing, which is the exact fragility the token-based membership check removed. Only a
+// observer subscribing, which is why membership is checked by token. Only a
 // holder of the slot's token can advance this number.
 #[derive(Clone)]
 struct MemberSlot {
@@ -482,8 +447,8 @@ type Rooms = Arc<DashMap<String, Room>>;
 struct RateLimitState {
     attempts: VecDeque<Instant>,
     cooldown_until: Option<Instant>,
-    // 15.3 Escalation tracking.
-    cooldown_history: VecDeque<Instant>, // 15.2 trips, purged to BAN_COOLDOWN_WINDOW
+    // Escalation tracking.
+    cooldown_history: VecDeque<Instant>, // trips, purged to BAN_COOLDOWN_WINDOW
     ban_until: Option<Instant>,
     ban_history: VecDeque<Instant>,      // 30-min-ban trips, purged to BAN_MEDIUM_WINDOW
 }
@@ -527,18 +492,20 @@ struct NewCodeResponse {
     code: String,
 }
 
-// 22.3 Ephemeral TURN credentials (coturn TURN REST API / use-auth-secret).
+// Ephemeral TURN credentials (coturn TURN REST API / use-auth-secret).
 // The relay secret and URLs live ONLY in the server's environment (deploy-only,
 // never in the repo); the static long-term credential is retired. A scraped
-// credential expires after TURN_CRED_TTL_SECS, so it can't be reused to steal
-// relay bandwidth at public launch.
+// credential expires after its TTL, so it can't be reused to steal relay bandwidth.
 //
-// The TTL used to be 2 h, four times the life of the room it serves. A room
-// cannot outlive MAX_SESSION_SECS, so a credential minted at join only has to
-// cover that plus resume grace; anything beyond is pure reuse window for a
-// scraper. Must stay >= MAX_SESSION_SECS or a long session loses its relay
-// mid-transfer.
-const TURN_CRED_TTL_SECS: u64 = MAX_SESSION_SECS + 15 * 60;
+// A room cannot outlive the session length, so a credential minted at join only
+// has to cover that plus resume grace; anything beyond is pure reuse window for a
+// scraper. Derived from the configured session length (BEEM_SESSION_SECS), never
+// a fixed number, so a longer session never loses its relay mid-transfer.
+const TURN_CRED_GRACE_SECS: u64 = 15 * 60;
+
+fn turn_cred_ttl_secs(session_secs: u64) -> u64 {
+    session_secs.saturating_add(TURN_CRED_GRACE_SECS)
+}
 
 #[derive(Clone)]
 struct TurnCfg {
@@ -598,15 +565,14 @@ fn turn_room_tag(secret: &[u8], code: &str) -> String {
 // use-auth-secret recomputes and validates. coturn HMACs the whole username
 // string either way, so the tag needs NO coturn-side configuration change.
 //
-// Tagging per room is what gives coturn's own `user-quota` teeth. Untagged,
-// every caller within the same second shared one username, so the quota bucket
-// was an arbitrary time slice; one abuser could spend the allowance that honest
-// pairs in that second needed. Per room, a single room can never exceed
-// user-quota allocations no matter how often its credential is re-fetched.
-fn turn_credential(secret: &[u8], now_unix: u64, room_tag: &str) -> (String, String) {
+// Tagging per room is what gives coturn's own `user-quota` teeth: the quota
+// bucket is one room, so a single room can never exceed user-quota allocations
+// no matter how often its credential is re-fetched, and never shares a bucket
+// with another room's callers.
+fn turn_credential(secret: &[u8], now_unix: u64, ttl_secs: u64, room_tag: &str) -> (String, String) {
     use base64::Engine;
     use hmac::{Hmac, Mac};
-    let expiry = now_unix + TURN_CRED_TTL_SECS;
+    let expiry = now_unix.saturating_add(ttl_secs);
     let username = if room_tag.is_empty() {
         expiry.to_string()
     } else {
@@ -629,7 +595,7 @@ fn is_valid_code(s: &str) -> bool {
     s.len() == 6 && s.bytes().all(|b| b.is_ascii_digit())
 }
 
-// 17.3 branding: accent color is spliced verbatim into a CSS custom property,
+// Branding: accent color is spliced verbatim into a CSS custom property,
 // so it's restricted to characters that can't close the declaration/rule and
 // start injecting new ones (no `;`, `{`, `}`).
 fn is_safe_css_color(s: &str) -> bool {
@@ -640,11 +606,10 @@ fn is_safe_css_color(s: &str) -> bool {
         })
 }
 
-// 17.3 branding: wordmark text is spliced into a JSON string literal in
+// Branding: wordmark text is spliced into a JSON string literal in
 // branding.json — escape backslash/quote and drop control characters so it
-// can't break out of the literal. (This used to be shipped as
-// branding.js, an unpinned script the page executed first; it is now data that
-// the SRI-pinned app.js applies.)
+// can't break out of the literal. It is data, applied by the SRI-pinned app.js,
+// never a script of its own.
 fn escape_json_string(s: &str) -> String {
     s.chars().take(64).flat_map(|c| match c {
         '\\' => vec!['\\', '\\'],
@@ -666,11 +631,11 @@ async fn main() {
     let relay_limit: u64 = std::env::var("BEEM_MAX_RELAY_BYTES").ok()
         .and_then(|s| s.parse().ok()).unwrap_or(MAX_RELAY_BYTES);
 
-    // 17.4 Optional stderr audit log for compliance. Off by default; no content, no
+    // Optional stderr audit log for compliance. Off by default; no content, no
     // codes, no raw IPs — fingerprint only (see ip_fingerprint).
     let audit = std::env::var("BEEM_AUDIT").ok().as_deref() == Some("1");
 
-    // 17.3 optional self-host branding: unset by default, no visible change.
+    // Optional self-host branding: unset by default, no visible change.
     let branding_css = std::env::var("BEEM_ACCENT_COLOR").ok()
         .filter(|c| is_safe_css_color(c))
         .map(|c| format!(":root {{ --accent: {c} !important; --accent-press: {c} !important; }}\n"))
@@ -718,7 +683,7 @@ async fn main() {
         ip_cfg: ip_cfg.clone(), allowed_origins,
     };
 
-    // 12.1 Rate limit: /new ~ 10/min per IP (burst 10, replenish 1 per 6s).
+    // Rate limit: /new ~ 10/min per IP (burst 10, replenish 1 per 6s).
     let governor_conf = Arc::new(
         GovernorConfigBuilder::default()
             .per_second(6)
@@ -728,7 +693,7 @@ async fn main() {
             .expect("governor config"),
     );
 
-    // 22.3 /turn.json config (deploy-only env; None in dev → route 404s) + its own
+    // /turn.json config (deploy-only env; None in dev → route 404s) + its own
     // rate-limit bucket, separate from /new so a code request and a cred fetch
     // don't share a budget.
     let turn_cfg = load_turn_cfg();
@@ -741,7 +706,7 @@ async fn main() {
             .expect("turn governor config"),
     );
 
-    // 12.6 Security headers.
+    // Security headers.
     let sec_headers = tower::ServiceBuilder::new()
         .layer(SetResponseHeaderLayer::overriding(
             HeaderName::from_static("strict-transport-security"),
@@ -965,7 +930,7 @@ fn sweep_maps(rooms: &Rooms, rate_limits: &RateLimits, concurrent: &Concurrent, 
     let ban_cooldown_window = Duration::from_secs(BAN_COOLDOWN_WINDOW_SECS);
     let ban_medium_window = Duration::from_secs(BAN_MEDIUM_WINDOW_SECS);
     rooms.retain(|_, r| room_retained(r.expires_at > now, r.attempts, r.tx.receiver_count()));
-    // 15.2 + 15.3 GC: keep entries with any active state or recent history.
+    // GC: keep entries with any active state or recent history.
     // Ladder memory must outlive the cooldown itself: an entry whose only live
     // state is a cooldown trip inside BAN_COOLDOWN_WINDOW still counts toward
     // the 3-trips→30-min-ban escalation, so it may not be swept.
@@ -1037,7 +1002,7 @@ async fn new_code(State(state): State<AppState>) -> Result<Json<NewCodeResponse>
     Err(StatusCode::SERVICE_UNAVAILABLE)
 }
 
-// 22.3 GET /turn.json — mints a short-lived TURN REST credential. Overrides the
+// GET /turn.json — mints a short-lived TURN REST credential. Overrides the
 // old static file. Absent config (local dev) → 404, so the client falls back to
 // public STUN exactly as before. Rate-limited at the router like /new.
 //
@@ -1073,11 +1038,12 @@ async fn turn_json(
         return Err(StatusCode::FORBIDDEN);
     }
     let tag = turn_room_tag(&cfg.secret, &code);
-    let (username, credential) = turn_credential(&cfg.secret, now_unix(), &tag);
+    let ttl = turn_cred_ttl_secs(state.session_secs);
+    let (username, credential) = turn_credential(&cfg.secret, now_unix(), ttl, &tag);
     Ok(Json(TurnJson { urls: cfg.urls, username, credential }))
 }
 
-// 15.2 + 15.3 Check per-IP WS connect; record this attempt; escalate ban tiers if warranted.
+// Check per-IP WS connect; record this attempt; escalate ban tiers if warranted.
 // Every /ws connection attempt is counted, valid or invalid code — this is intentional so
 // an attacker can't probe the code space faster than the honest-case pair rate allows.
 //
@@ -1088,7 +1054,7 @@ async fn turn_json(
 // Permanent ban is intentionally manual-only (admin config, not this function) since shared
 // NATs mean an automatic permanent ban could lock out thousands of legitimate users.
 //
-// Pure over (state, now) so it can be unit-tested with synthetic timestamps — see phase 15.6a.
+// Pure over (state, now) so it can be unit-tested with synthetic timestamps.
 fn check_and_record(state: &mut RateLimitState, now: Instant) -> Result<(), BlockReason> {
     // 1. Active hard/medium ban takes precedence.
     if let Some(until) = state.ban_until {
@@ -1190,7 +1156,7 @@ fn check_ws_rate_limit(rate_limits: &RateLimits, ip: IpAddr, now: Instant) -> Re
     check_and_record(entry.value_mut(), now)
 }
 
-// 15.10 Resolve the real client IP.
+// Resolve the real client IP.
 //
 // Deployment model: the server binds to 127.0.0.1:8080 and is fronted by a local
 // process (cloudflared, nginx, Caddy) that terminates TLS and forwards. In that setup
@@ -1286,8 +1252,7 @@ impl ClientIpConfig {
     }
 }
 
-// A configured header that never gets read is the silent version of the bug this whole
-// resolver fixes: the startup notice only fires when the header is UNSET, so an operator
+// A configured header that never gets read would fail silently: the startup notice only fires when the header is UNSET, so an operator
 // who names a header but forgets `IRIS_TRUSTED_PROXIES` — the shipped Docker case, where
 // the peer is the bridge gateway rather than loopback — would otherwise be told nothing
 // while every client shares one bucket. Warn once, on the first request that proves it.
@@ -1515,7 +1480,7 @@ async fn ws_handler(
     headers: HeaderMap,
     State(state): State<AppState>,
 ) -> impl IntoResponse {
-    // 15.10 Resolve the real client IP (may be behind a local reverse proxy).
+    // Resolve the real client IP (may be behind a local reverse proxy).
     let ip = resolve_client_ip(&state.ip_cfg, &headers, addr.ip());
 
     // Origin check FIRST — before the rate-limit charge below. That order is the whole
@@ -1527,7 +1492,7 @@ async fn ws_handler(
         });
     }
 
-    // 15.2 + 15.3 Per-IP rate/ban check before anything else.
+    // Per-IP rate/ban check before anything else.
     if let Err(block) = check_ws_rate_limit(&state.rate_limits, ip, Instant::now()) {
         let (code, reason) = match &block {
             BlockReason::Cooldown { remaining } => (
@@ -1540,7 +1505,7 @@ async fn ws_handler(
             ),
             BlockReason::Ban24h { remaining, newly_engaged } => {
                 if *newly_engaged {
-                    // 15.3 One-line stderr log on 24-h escalation only. No PII: IP fingerprint
+                    // One-line stderr log on 24-h escalation only. No PII: IP fingerprint
                     // (DefaultHasher-based, not cryptographic) + counters.
                     let fp = ip_fingerprint(ip);
                     let (cd_n, ban_n) = {
@@ -1548,7 +1513,7 @@ async fn ws_handler(
                         e.map(|s| (s.cooldown_history.len(), s.ban_history.len())).unwrap_or((0, 0))
                     };
                     eprintln!(
-                        "[15.3] ip_fp={:x} escalated to 24h ban (cooldowns_1h={}, medium_bans_24h={})",
+                        "[ban] ip_fp={:x} escalated to 24h ban (cooldowns_1h={}, medium_bans_24h={})",
                         fp, cd_n, ban_n
                     );
                 }
@@ -1560,7 +1525,7 @@ async fn ws_handler(
         });
     }
 
-    // 12.4 Strict code format; refuse up front.
+    // Strict code format; refuse up front.
     if !is_valid_code(&params.code) {
         return ws.on_upgrade(|mut socket| async move {
             send_close_signal(&mut socket, CLOSE_CODE_FORMAT, "").await;
@@ -1584,7 +1549,7 @@ async fn ws_handler(
         })
 }
 
-// 17.4 msg_payload_len: bytes charged toward the audit log's in/out counters.
+// msg_payload_len: bytes charged toward the audit log's in/out counters.
 // Control frames (Ping/Pong/Close) carry no application payload — 0.
 fn msg_payload_len(msg: &Message) -> usize {
     match msg {
@@ -1595,7 +1560,7 @@ fn msg_payload_len(msg: &Message) -> usize {
 }
 
 async fn pair(mut socket: WebSocket, code: String, resume_token: Option<String>, rooms: Rooms, session_secs: u64, relay_limit: u64, ip: IpAddr, audit: bool) {
-    // 15.11 Per-code brute-force guard: increment attempts on lookup. If this
+    // Per-code brute-force guard: increment attempts on lookup. If this
     // attempt would put us at or past MAX_CODE_ATTEMPTS, burn the room entirely.
     // Also capture attempt count before increment — only the first 2 connections
     // (the legitimate pair) are allowed to broadcast close signals to each other.
@@ -1633,14 +1598,10 @@ async fn pair(mut socket: WebSocket, code: String, resume_token: Option<String>,
         let both_slots_minted = entry.member_tokens.len() >= 2;
 
         // A presented token matching one on file is proof of membership,
-        // full stop — it does not depend on `tx.receiver_count()` at all. This
-        // is the fix for the reconnect-after-network-switch bug: a dead-but-
-        // not-closed old connection keeps the broadcast channel's subscriber
-        // count up, so the count-based heuristic below misreads a legitimate
-        // rejoin as a third-party observer and silently mutes it. Observed in
-        // practice: `join attempts_before=2 receiver_count=2
-        // is_pair_member=false` on a real rejoin. A token sidesteps the
-        // arithmetic instead of trying to patch it further.
+        // full stop — it does not depend on `tx.receiver_count()` at all. A
+        // dead-but-not-closed old connection keeps the broadcast channel's
+        // subscriber count up after a network switch, so a headcount cannot tell
+        // a legitimate rejoin from an observer; a token can.
         // This needs the slot itself, not just a yes/no — a departing connection
         // has to be able to ask "was MY slot refilled?" and nothing else.
         let mut my_slot = slot_index(&entry.member_tokens, resume_token.as_deref());
@@ -1676,12 +1637,9 @@ async fn pair(mut socket: WebSocket, code: String, resume_token: Option<String>,
             // No token presented (or an invalid one — a stranger's guess must
             // not get the resume bypass either): fall back to the EXISTING
             // count-based rule, unchanged. Mobile-resume joins bypass the
-            // brute-force counter (observed in practice: picker/screen-
-            // lock cycles burned the room mid-transfer after ~3 resumes) but
-            // are bounded by their own generous cap. This fallback is
-            // deliberate belt-and-braces: a client that somehow lost its token
-            // still behaves exactly as it does today. Remove it once the
-            // token path is proven in practice.
+            // brute-force counter (picker/screen-lock cycles are ordinary on a
+            // phone) but are bounded by their own generous cap. This fallback is
+            // deliberate belt-and-braces for a client that somehow lost its token.
             //
             // Gated on `!both_slots_minted` — once a room has minted a token
             // for both pair members, a bare code plus a favourable headcount (e.g.
@@ -1728,12 +1686,11 @@ async fn pair(mut socket: WebSocket, code: String, resume_token: Option<String>,
         // count-only version it backs up: an observer without a token can no
         // longer be misclassified as a member no matter what the headcount says.
         // Reuses the exact same `resume_admitted` predicate the branch gate
-        // above used, rather than re-deriving "is this a resume" a second time —
-        // two independent evaluations of the same question are how the original
-        // bug shape worked (branch selection and membership grant could disagree).
+        // above used, rather than re-deriving "is this a resume" a second time,
+        // so branch selection and membership grant can never disagree.
         let is_pair_member =
             token_valid || attempt_before < 2 || resume_admitted(both_slots_minted, attempt_before, rc);
-        // 23.7 Likewise, a token-proven rejoin is always a resume (the survivor
+        // Likewise, a token-proven rejoin is always a resume (the survivor
         // may be showing the grace banner and needs the "peer is back" signal)
         // regardless of the count-based was_resume heuristic below it.
         let was_resume = token_valid || (attempt_before >= 2 && rc == 1);
@@ -1767,7 +1724,7 @@ async fn pair(mut socket: WebSocket, code: String, resume_token: Option<String>,
     let my_id = NEXT_ID.fetch_add(1, Ordering::Relaxed);
 
 
-    // hand the freshly minted token to THIS socket only. Never
+    // Hand the freshly minted token to THIS socket only. Never
     // `tx.send` — that broadcasts into the room and would hand the token to
     // the peer (and any observer) too, defeating its purpose as proof of
     // this specific connection's membership.
@@ -1776,23 +1733,23 @@ async fn pair(mut socket: WebSocket, code: String, resume_token: Option<String>,
     }
 
     if was_resume {
-        // 23.7 Clears the survivor's "waiting up to 30 s" banner.
+        // Clears the survivor's "waiting up to 30 s" banner.
         let _ = tx.send((my_id, Message::Text("BEEM-BACK".into())));
     }
 
-    // 12.3 Max session duration.
+    // Max session duration.
     let deadline = tokio::time::Instant::now() + Duration::from_secs(session_secs);
 
-    // 15.9 If the peer broadcasts a Close through our room channel, forward it to our own
+    // If the peer broadcasts a Close through our room channel, forward it to our own
     // socket and mark so the post-loop step doesn't rebroadcast another Close back at them.
     let mut peer_closed_us = false;
 
-    // 23.4 Set when we ourselves sent BEEM-LEAVE (deliberate panic-vanish exit).
+    // Set when we ourselves sent BEEM-LEAVE (deliberate panic-vanish exit).
     // Skips the post-loop resume-grace entirely — we already evicted the peer
     // and removed the room, there is nothing left to hold open.
     let mut deliberate_leave = false;
 
-    // 17.4 Audit counters (bytes only — no content, no IPs, no codes).
+    // Audit counters (bytes only — no content, no IPs, no codes).
     let started = Instant::now();
     let mut bytes_in: u64 = 0;
     let mut bytes_out: u64 = 0;
@@ -1834,16 +1791,12 @@ async fn pair(mut socket: WebSocket, code: String, resume_token: Option<String>,
     // ORDER IS LOAD-BEARING — `last_seen` must be stamped BEFORE the interval is
     // created, and a refactor that "tidies" these two lines together will silently
     // regress it. The silence check is only evaluated on a tick, so its resolution
-    // is HEARTBEAT_INTERVAL_SECS, and PEER_SILENCE_TIMEOUT_SECS (45) is exactly
-    // three of them — the threshold lands on a tick boundary. Stamp `last_seen`
+    // is HEARTBEAT_TICK_SECS, and PEER_SILENCE_TIMEOUT_SECS (45) is an exact
+    // multiple of it — the threshold lands on a tick boundary. Stamp `last_seen`
     // after the interval and elapsed at the T+45 tick is `45 − δ`, which loses to
-    // a strict `>` every single time and slips the reap to T+60.
-    //
-    // Measured by the timing prober before this fix: 60.004 s, deterministically,
-    // against a constant that says 45.
+    // a strict `>` every time and slips the reap one whole tick late.
     //
     // No unit test can catch this — it is initialisation order, not arithmetic.
-    // `node tests/timing/probe.mjs` (M2a) is the regression gate.
     let mut last_seen = tokio::time::Instant::now();
     let mut heartbeat = tokio::time::interval(Duration::from_secs(HEARTBEAT_TICK_SECS));
     let mut ticks: u64 = 0;
@@ -1931,7 +1884,7 @@ async fn pair(mut socket: WebSocket, code: String, resume_token: Option<String>,
                     Ok((from, msg)) => {
                         if from != my_id {
                             if matches!(msg, Message::Close(_)) {
-                                // 15.10b Only CLOSE_PEER_LEFT ever reaches us via broadcast
+                                // Only CLOSE_PEER_LEFT ever reaches us via broadcast
                                 // (see post-loop tx.send below). Send the text marker first.
                                 send_close_signal(&mut socket, CLOSE_PEER_LEFT, "").await;
                                 peer_closed_us = true;
@@ -1939,7 +1892,7 @@ async fn pair(mut socket: WebSocket, code: String, resume_token: Option<String>,
                             }
                             let n = msg_payload_len(&msg) as u64;
                             bytes_out += n;
-                            // THE parking point (confirmed in practice). select! is
+                            // THE parking point. select! is
                             // suspended for the whole of this await, so an unbounded
                             // write here disables the heartbeat arm completely.
                             if !send_bounded(&mut socket, msg).await { break; }
@@ -1970,7 +1923,7 @@ async fn pair(mut socket: WebSocket, code: String, resume_token: Option<String>,
         }
     }
 
-    // F10: every exit from the loop above is a bare `break` — none of them flush
+    // Every exit from the loop above is a bare `break` — none of them flush
     // `unflushed` into the room's counter, only relay_charge's own 64 MiB threshold
     // does that. A connection that closes with bytes still sitting under that
     // threshold left them uncharged forever, understating the room's true relay
@@ -1985,8 +1938,8 @@ async fn pair(mut socket: WebSocket, code: String, resume_token: Option<String>,
         }
     }
 
-    // 17.4 One stderr line per session-end when BEEM_AUDIT=1. No content, no
-    // codes, no raw IPs — fingerprint only (reuses 15.3's ip_fingerprint).
+    // One stderr line per session-end when BEEM_AUDIT=1. No content, no
+    // codes, no raw IPs — fingerprint only (reuses ip_fingerprint).
     if audit {
         eprintln!(
             "[audit] session={:x} bytes_in={} bytes_out={} duration_s={}",
@@ -1994,13 +1947,13 @@ async fn pair(mut socket: WebSocket, code: String, resume_token: Option<String>,
         );
     }
 
-    // Say why. A socket that vanishes on a limit with no explanation is the same
-    // class of bug as the sender that claimed a delivered file might not have arrived.
+    // Say why: a socket that vanishes on a limit with no explanation leaves the
+    // user guessing.
     if budget_hit {
         send_close_signal(&mut socket, CLOSE_RELAY_BUDGET, "").await;
     }
 
-    // 15.9 On our exit (tab close, error, deadline), tell the other peer once.
+    // On our exit (tab close, error, deadline), tell the other peer once.
     // Only legitimate pair members (first 2 connections) may evict each other.
     // Third-party observers closing must not terminate the active session.
     //
@@ -2012,8 +1965,7 @@ async fn pair(mut socket: WebSocket, code: String, resume_token: Option<String>,
     // If this connection's own slot has already been re-claimed, the member
     // it represents is not gone — it is sitting in the room on a newer socket.
     // Announcing a grace window now tells the survivor something false and tells
-    // the returned peer that IT has lost its peer, which is the doubled banner
-    // seen in practice. There is nobody left to inform.
+    // the returned peer that IT has lost its peer. There is nobody left to inform.
     let slot_reclaimed = match my_slot {
         Some(i) => rooms.get(&code).is_some_and(|r| {
             r.member_tokens.get(i).is_some_and(|s| s.claims > claims_at_join)
@@ -2025,7 +1977,7 @@ async fn pair(mut socket: WebSocket, code: String, resume_token: Option<String>,
         if let Some(mut r) = rooms.get_mut(&code) {
             r.expires_at = Instant::now() + Duration::from_secs(RESUME_GRACE_SECS + 10);
         }
-        // 23.7 Honest wait: tell the survivor the peer went silent and the grace
+        // Honest wait: tell the survivor the peer went silent and the grace
         // clock is running (cosmetic banner — old clients ignore unknown Text
         // markers, and it never changes session state on either side).
         let _ = tx.send((my_id, Message::Text(format!("BEEM-GRACE:{}", RESUME_GRACE_SECS))));
@@ -2052,25 +2004,27 @@ mod tests {
     use super::*;
     use std::net::Ipv4Addr;
 
-    // TEST-S-017 — TURN REST credential matches coturn's use-auth-secret format.
+    // TURN REST credential matches coturn's use-auth-secret format.
     // Reference vector computed independently (Python hmac): base64(HMAC-SHA1(
     // "testsecret", "1700000000")). now_unix chosen so expiry = now + TTL = 1700000000.
     #[test]
     fn test_turn_credential_vector() {
-        let now = 1700000000 - TURN_CRED_TTL_SECS;
-        let (username, credential) = turn_credential(b"testsecret", now, "");
+        let ttl = turn_cred_ttl_secs(MAX_SESSION_SECS);
+        let now = 1700000000 - ttl;
+        let (username, credential) = turn_credential(b"testsecret", now, ttl, "");
         assert_eq!(username, "1700000000", "username must be the unix expiry");
         assert_eq!(credential, "n4KuwizbZtngI4DON7Ws71orzs4=", "coturn REST HMAC format");
     }
 
-    // TEST-S-018 — expiry is in the future and username parses as its timestamp.
+    // Expiry is in the future and username parses as its timestamp.
     #[test]
     fn test_turn_credential_expiry_future() {
         let now = now_unix();
-        let (username, _) = turn_credential(b"anything", now, "");
+        let ttl = turn_cred_ttl_secs(MAX_SESSION_SECS);
+        let (username, _) = turn_credential(b"anything", now, ttl, "");
         let expiry: u64 = username.parse().expect("username is a unix timestamp");
         assert!(expiry > now, "expiry must be ahead of now");
-        assert_eq!(expiry - now, TURN_CRED_TTL_SECS, "TTL exactly applied");
+        assert_eq!(expiry - now, ttl, "TTL exactly applied");
     }
 
     // The per-room tag must be stable for a code, different across codes,
@@ -2093,9 +2047,10 @@ mod tests {
     // -byte what it was, so the pinned vector above still holds.
     #[test]
     fn test_turn_credential_tagged_username_shape() {
-        let now = 1700000000 - TURN_CRED_TTL_SECS;
+        let ttl = turn_cred_ttl_secs(MAX_SESSION_SECS);
+        let now = 1700000000 - ttl;
         let tag = turn_room_tag(b"testsecret", "424242");
-        let (username, credential) = turn_credential(b"testsecret", now, &tag);
+        let (username, credential) = turn_credential(b"testsecret", now, ttl, &tag);
         assert_eq!(username, format!("1700000000:{}", tag));
 
         use base64::Engine;
@@ -2105,25 +2060,26 @@ mod tests {
         let want = base64::engine::general_purpose::STANDARD.encode(mac.finalize().into_bytes());
         assert_eq!(credential, want, "HMAC covers the full tagged username");
 
-        let (plain, _) = turn_credential(b"testsecret", now, "");
+        let (plain, _) = turn_credential(b"testsecret", now, ttl, "");
         assert_eq!(plain, "1700000000", "untagged form unchanged");
         assert_ne!(plain, username);
     }
 
     // The credential must outlive the longest possible room, or a session
-    // loses its relay mid-transfer.
+    // loses its relay mid-transfer — for the default and for any configured
+    // session length — and must not outlive it by more than the resume grace.
     #[test]
     fn test_turn_ttl_covers_a_full_session() {
-        assert!(
-            TURN_CRED_TTL_SECS >= MAX_SESSION_SECS,
-            "TTL {} must cover a full {}s session",
-            TURN_CRED_TTL_SECS,
-            MAX_SESSION_SECS
-        );
-        assert!(TURN_CRED_TTL_SECS < 2 * 60 * 60, "no longer the old 2 h window");
+        for session in [MAX_SESSION_SECS, 2 * 60 * 60, 8 * 60 * 60, 600] {
+            let ttl = turn_cred_ttl_secs(session);
+            assert!(ttl >= session, "TTL {ttl} must cover a full {session}s session");
+            assert_eq!(ttl - session, TURN_CRED_GRACE_SECS, "only resume grace beyond the session");
+        }
+        assert_eq!(turn_cred_ttl_secs(MAX_SESSION_SECS), 4500, "default stays 75 min");
+        assert_eq!(turn_cred_ttl_secs(u64::MAX), u64::MAX, "saturates instead of wrapping");
     }
 
-    // TEST-S-001 — Code format validation
+    // Code format validation
     #[test]
     fn test_is_valid_code() {
         assert!(is_valid_code("000000"));
@@ -2139,7 +2095,7 @@ mod tests {
         assert!(!is_valid_code("１２３４５６")); // full-width digits (each is 3 UTF-8 bytes, len != 6)
     }
 
-    // TEST-S-002 — Code generator format + bias check
+    // Code generator format + bias check
     #[test]
     fn test_generate_code_format() {
         let mut rng = rand::thread_rng();
@@ -2154,7 +2110,7 @@ mod tests {
         }
     }
 
-    // TEST-S-003 — Rate-limit: cooldown trip
+    // Rate-limit: cooldown trip
     // The check fires when attempts.len() >= WS_MAX_ATTEMPTS_PER_WINDOW (5),
     // so 5 calls are allowed and the 6th triggers the cooldown.
     #[test]
@@ -2175,7 +2131,7 @@ mod tests {
         }
     }
 
-    // TEST-S-004 — Rate-limit: 30-min ban escalation
+    // Rate-limit: 30-min ban escalation
     #[test]
     fn test_ban30m_escalation() {
         let mut state = RateLimitState::default();
@@ -2193,7 +2149,7 @@ mod tests {
         }
     }
 
-    // TEST-S-005 — Rate-limit: 24-h ban escalation
+    // Rate-limit: 24-h ban escalation
     #[test]
     fn test_ban24h_escalation() {
         let mut state = RateLimitState::default();
@@ -2214,7 +2170,7 @@ mod tests {
         }
     }
 
-    // TEST-S-006 — Cooldown expiry clears short-window state
+    // Cooldown expiry clears short-window state
     #[test]
     fn test_cooldown_expiry_clears_state() {
         let mut state = RateLimitState::default();
@@ -2242,7 +2198,7 @@ mod tests {
         }
     }
 
-    // TEST-S-007 — unconfigured, no header is read from any peer.
+    // Unconfigured, no header is read from any peer.
     #[test]
     fn test_client_ip_unconfigured_ignores_headers() {
         let c = cfg(None, &[]);
@@ -2260,7 +2216,7 @@ mod tests {
         assert_eq!(resolve_client_ip(&c, &h, public), public);
     }
 
-    // TEST-S-007b — a configured header is believed only from a trusted hop.
+    // A configured header is believed only from a trusted hop.
     #[test]
     fn test_client_ip_trusted_hop_gate() {
         let c = cfg(Some("cf-connecting-ip"), &[]);
@@ -2285,7 +2241,7 @@ mod tests {
         assert_eq!(resolve_client_ip(&c, &other, ip("127.0.0.1")), ip("127.0.0.1"));
     }
 
-    // TEST-S-007c — the walk runs right to left, past trusted hops only.
+    // The walk runs right to left, past trusted hops only.
     #[test]
     fn test_client_ip_walks_right_to_left() {
         let c = cfg(Some("x-forwarded-for"), &["198.51.100.7"]);
@@ -2324,7 +2280,7 @@ mod tests {
         assert_eq!(resolve_client_ip(&c, &h, loopback), ip("2001:db8::1"));
     }
 
-    // TEST-S-020 — a foreign page's socket is refused; our own and non-browsers pass.
+    // A foreign page's socket is refused; our own and non-browsers pass.
     #[test]
     fn test_origin_allowed() {
         let none: Vec<String> = Vec::new();
@@ -2344,7 +2300,7 @@ mod tests {
         // Case is not significant in an authority.
         assert!(origin_allowed(&host(Some("https://IRIS.EXAMPLE")), &none));
 
-        // Any other site — the finding itself.
+        // Any other site is refused.
         assert!(!origin_allowed(&host(Some("https://evil.example")), &none));
         // A subdomain is a different origin, and a suffix match would have passed it.
         assert!(!origin_allowed(&host(Some("https://iris.example.evil.test")), &none));
@@ -2400,7 +2356,7 @@ mod tests {
         assert!(!origin_allowed(&h, &none));
     }
 
-    // TEST-S-021 — the slot is released by Drop, including when the upgrade callback
+    // The slot is released by Drop, including when the upgrade callback
     // never runs and the closure holding it is simply dropped.
     #[test]
     fn test_concurrency_slot_releases_on_drop() {
@@ -2440,7 +2396,7 @@ mod tests {
         assert!(ConcurrencySlot::acquire(&map, addr).is_some());
     }
 
-    // TEST-S-007f — v4-mapped v6 folds to v4, so one host cannot hold two identities
+    // V4-mapped v6 folds to v4, so one host cannot hold two identities
     // and a dual-stack loopback still reads as a trusted hop.
     #[test]
     fn test_client_ip_v4_mapped_folding() {
@@ -2473,7 +2429,7 @@ mod tests {
         );
     }
 
-    // TEST-S-007d — an injected duplicate header line loses to the real hop's line.
+    // An injected duplicate header line loses to the real hop's line.
     #[test]
     fn test_client_ip_duplicate_header_lines() {
         let c = cfg(Some("x-forwarded-for"), &[]);
@@ -2487,7 +2443,7 @@ mod tests {
         assert_eq!(resolve_client_ip(&c, &h, loopback), ip("203.0.113.5"));
     }
 
-    // TEST-S-007e — both rate limiters key on that same identity, not the TCP peer.
+    // Both rate limiters key on that same identity, not the TCP peer.
     #[test]
     fn test_key_extractor_matches_resolver() {
         let c = Arc::new(cfg(Some("cf-connecting-ip"), &[]));
@@ -2521,7 +2477,7 @@ mod tests {
         assert!(ex.extract(&bare).is_err());
     }
 
-    // TEST-S-008 — Room lifecycle: per-code attempt burn
+    // Room lifecycle: per-code attempt burn
     #[test]
     fn test_per_code_attempt_burn() {
         let rooms: Rooms = Arc::new(DashMap::new());
@@ -2550,7 +2506,7 @@ mod tests {
         assert!(rooms.get(&code).is_none(), "room must be gone after 5th attempt");
     }
 
-    // TEST-S-009 — Room TTL expiry (sweeper retention predicate)
+    // Room TTL expiry (sweeper retention predicate)
     #[test]
     fn test_room_ttl_expiry() {
         let now = Instant::now();
@@ -2562,7 +2518,7 @@ mod tests {
         assert!(fresh.expires_at > now,      "fresh room should be kept");
     }
 
-    // TEST-S-009b — sweeper must not GC a paired room with live WS subscribers
+    // Sweeper must not GC a paired room with live WS subscribers
     // past its TTL, but must still hard-expire unpaired rooms so join codes
     // don't outlive their 60s window.
     #[test]
@@ -2613,7 +2569,7 @@ mod tests {
         drop(rx_unpaired);
     }
 
-    // TEST-S-010 — ip_fingerprint is deterministic and not PII
+    // ip_fingerprint is deterministic and not PII
     #[test]
     fn test_ip_fingerprint() {
         let ip: IpAddr = "1.2.3.4".parse().unwrap();
@@ -2625,7 +2581,7 @@ mod tests {
         assert_eq!(fps.len(), 100, "100 distinct IPs must produce 100 distinct fingerprints");
     }
 
-    // TEST-S-011 — WS routing isolation between codes (broadcast-channel level)
+    // WS routing isolation between codes (broadcast-channel level)
     #[test]
     fn test_broadcast_room_isolation() {
         let (tx_a, _) = broadcast::channel::<(u64, Message)>(256);
@@ -2639,7 +2595,7 @@ mod tests {
         assert!(rx_b.try_recv().is_err(), "room-B subscriber must NOT receive room-A's frame");
     }
 
-    // TEST-S-012 — Sweeper GCs zeroed concurrent-IP counters (regression test)
+    // Sweeper GCs zeroed concurrent-IP counters (regression test)
     // A counter decremented to 0 is a dead entry and must be removed; an active
     // connection (n ≥ 1) must survive the pass.
     #[test]
@@ -2659,7 +2615,7 @@ mod tests {
         assert_eq!(*concurrent.get(&active_ip).unwrap(), 2, "active counter must survive");
     }
 
-    // TEST-S-012b — Sweeper must not erase ban-ladder memory (S3-02 regression).
+    // Sweeper must not erase ban-ladder memory.
     // An entry whose ONLY live state is cooldown trips inside BAN_COOLDOWN_WINDOW
     // (attempts stale, cooldown expired, no ban) still counts toward the
     // 3-trips→30-min-ban escalation and must survive the sweep; once the last
@@ -2691,7 +2647,7 @@ mod tests {
         assert!(rate_limits.get(&stale_ip).is_none(), "out-of-window history is dead state and must be GC'd");
     }
 
-    // TEST-S-013 — 17.4 audit byte-counting: payload length by message variant
+    // Audit byte-counting: payload length by message variant
     #[test]
     fn test_msg_payload_len() {
         assert_eq!(msg_payload_len(&Message::Text("hello".to_string())), 5);
@@ -2701,7 +2657,7 @@ mod tests {
         assert_eq!(msg_payload_len(&Message::Close(None)), 0);
     }
 
-    // TEST-S-035 — 25.3 a pair member may relay binary only: any Text frame that
+    // A pair member may relay binary only: any Text frame that
     // is not the (separately consumed) BEEM-LEAVE marker is dropped, so a modified
     // peer cannot inject BEEM-TOKEN / BEEM-CLOSE / BEEM-BUDGET into its partner.
     #[test]
@@ -2724,7 +2680,7 @@ mod tests {
         assert!(!relayable_from_member(&Message::Close(None)));
     }
 
-    // TEST-S-014 — 23.4 BEEM-LEAVE marker recognition
+    // BEEM-LEAVE marker recognition
     #[test]
     fn test_is_leave_marker() {
         assert!(is_leave_marker("BEEM-LEAVE"));
@@ -2734,8 +2690,8 @@ mod tests {
         assert!(!is_leave_marker("BEEM-LEAVEX"));
     }
 
-    // TEST-S-015 — mobile-resume joins must not spend the brute-force budget
-    // (observed in practice: ~3 picker cycles burned the room mid-transfer).
+    // mobile-resume joins must not spend the brute-force budget
+    // (picker cycles on a phone are routine and must not burn the room).
     #[test]
     fn test_is_resume_join() {
         // Pairing itself is never a resume.
@@ -2751,7 +2707,7 @@ mod tests {
         assert!(!is_resume_join(3, 2));
     }
 
-    // TEST-S-016 — a long session's resume cycles never reach the burn line,
+    // A long session's resume cycles never reach the burn line,
     // while attacker-style joins still do. Simulates the counting logic of
     // pair() against the realistic scenario (pair + many picker cycles).
     #[test]
@@ -2769,7 +2725,7 @@ mod tests {
             resumes += 1;
             assert!(resumes <= MAX_RESUME_JOINS, "resume cap hit too early");
         }
-        // attempts never moved past the pair — room alive.
+        // Attempts never moved past the pair — room alive.
         assert!(attempts < MAX_CODE_ATTEMPTS);
         // Attacker joins during an ACTIVE session (2 subscribers): counted,
         // and the 5th total attempt burns the room as before.
@@ -2780,7 +2736,7 @@ mod tests {
         assert!(attempts >= MAX_CODE_ATTEMPTS, "brute-force cap lost its teeth");
     }
 
-    // TEST-S-020 — silence detection. A phone that leaves WiFi blackholes its
+    // Silence detection. A phone that leaves WiFi blackholes its
     // TCP, so nothing ever closes the socket; without this the task parked for the
     // full session hour and the survivor's UI claimed "Connected" the whole time.
     #[test]
@@ -2818,7 +2774,7 @@ mod tests {
         assert!(PEER_SILENCE_TIMEOUT_SECS < MAX_SESSION_SECS);
     }
 
-    // TEST-S-019 — only pair members may broadcast into a room (BEEM-LEAVE
+    // Only pair members may broadcast into a room (BEEM-LEAVE
     // teardown + relay injection). An observer joining a live, full session is not a
     // pair member, so its frames — including BEEM-LEAVE — are dropped by the gate.
     // Mirrors the exact membership expression used at the `pair()` call site:
@@ -2849,12 +2805,10 @@ mod tests {
         assert!(!is_resume_join(2, 2) && !member(false, 2, 2));
     }
 
-    // TEST-S-029 — the count-based resume fallback must stop granting membership
+    // The count-based resume fallback must stop granting membership
     // once a room has minted a token for both legitimate members. Before that point,
-    // a stale dead-but-not-closed subscriber can hold receiver_count down and let a
-    // tokenless stranger read as "the survivor's resume" — the exact headcount that
-    // used to admit a real resume must now be refused once both tokens exist, closing
-    // the eviction path a code-holder had into a live, fully-established session.
+    // the headcount rule applies; once both tokens exist, the same favourable
+    // headcount is refused and only a token admits.
     #[test]
     fn test_resume_admitted_requires_open_slot() {
         // Before both slots are minted, the plain count heuristic still applies —
@@ -2863,8 +2817,8 @@ mod tests {
         assert!(resume_admitted(false, 2, 0), "pre-token resume — both backgrounded at once");
         assert!(!resume_admitted(false, 2, 2), "still not a resume with both peers live");
 
-        // Once both slots are minted, the SAME favourable headcount that used to
-        // grant membership must no longer be enough — a token is now required.
+        // Once both slots are minted, the SAME favourable headcount is not
+        // enough — a token is required.
         assert!(!resume_admitted(true, 2, 1), "full room, no token — must not admit");
         assert!(!resume_admitted(true, 2, 0), "full room, no token — must not admit");
         assert!(!resume_admitted(true, 4, 1), "still refused arbitrarily later in the session");
@@ -2875,11 +2829,9 @@ mod tests {
         assert!(!resume_admitted(false, 0, 0));
     }
 
-    // TEST-S-030 — reaching the resume cap must always refuse the join, but must
-    // only ever destroy the room when nobody live is left in it. Regression for the
-    // audit finding where a room's own 65th legitimate resume — resumes never reset —
-    // deleted the room out from under its still-connected partner, and a tokenless
-    // attacker could reach the same destructive path deliberately.
+    // Reaching the resume cap must always refuse the join, but must
+    // only ever destroy the room when nobody live is left in it — resumes never
+    // reset, so a long session's legitimate resumes must not cost its partner the room.
     #[test]
     fn test_burn_room_on_resume_cap_does_not_evict_a_live_pair() {
         // At and below the cap: never burned, whatever the headcount.
@@ -2895,7 +2847,7 @@ mod tests {
         assert!(burn_room_on_resume_cap(MAX_RESUME_JOINS + 1, 0), "an empty room is still reclaimed on the cap");
     }
 
-    // TEST-S-021 — slot_index, the membership proof gate. A peer that
+    // slot_index, the membership proof gate. A peer that
     // reconnects after a network switch (new WS, old one dead but not yet
     // closed) presents this to prove it's still the same pair member, without
     // relying on `receiver_count` arithmetic that a stale connection can throw
@@ -2918,18 +2870,16 @@ mod tests {
         assert!(slot_index(&[], Some(&"a".repeat(32))).is_none(), "empty token list must never match");
     }
 
-    // TEST-S-024 — room retention and room joinability, and the relationship
-    // between them. The bug this pins is not a wrong value, it is two copies of
-    // one rule that drifted: `pair()` refused rooms the sweeper was deliberately
-    // keeping alive for a resume, so every reconnect past CODE_TTL_SECS got
-    // CLOSE_CODE_MISSING on a session that was working fine.
+    // Room retention and room joinability, and the relationship between them:
+    // a room the sweeper keeps alive for a resume must be joinable by a token
+    // holder past CODE_TTL_SECS.
     #[test]
     fn test_room_lifetime() {
         // Inside the TTL nothing changed — no token needed, exactly as before.
         assert!(room_joinable(true, false, 0), "fresh room, no token, must still join");
         assert!(room_retained(true, 0, 0), "fresh room is kept regardless");
 
-        // Past the TTL with a live pair: THE regression. Retained AND joinable by
+        // Past the TTL with a live pair: the case this pins. Retained AND joinable by
         // a token holder — these two must agree or the room is kept for nobody.
         assert!(room_retained(false, 2, 1), "paired + live must survive the sweeper");
         assert!(room_joinable(false, true, 1), "…and a token holder must get back IN");
@@ -2958,7 +2908,7 @@ mod tests {
         }
     }
 
-    // TEST-S-023 — a departing connection must be able to tell "my peer is
+    // A departing connection must be able to tell "my peer is
     // gone" from "my peer is already back on a new socket". The zombie case is
     // the whole reason: the phone rejoined at ~10 s and the dead connection was
     // not reaped until ~45 s, so its exit broadcast a grace window into a room
@@ -3001,7 +2951,7 @@ mod tests {
         assert_eq!(slots[b_idx].claims, 0, "one member resuming must not silence the other");
     }
 
-    // TEST-S-022 — ct_eq, the constant-time byte comparison slot_index is
+    // ct_eq, the constant-time byte comparison slot_index is
     // built on. Real-world case it defends: a membership gate is exactly the
     // kind of check that should never be written as a short-circuiting `==`
     // even when (as here) the practical timing signal is negligible over a
@@ -3015,7 +2965,7 @@ mod tests {
         assert!(ct_eq("", ""), "two empty strings must match");
     }
 
-    // TEST-S-025 — the relay ceiling's decision function.
+    // The relay ceiling's decision function.
     // Real-world case it defends: a real deployment's lane test measured whole files
     // crossing the WS relay while the byte counters were compared to nothing. The
     // ordering that matters here is that the warning fires strictly BEFORE the close
@@ -3036,7 +2986,7 @@ mod tests {
         assert_eq!(relay_budget_state(u64::MAX, 0, false), RelayBudget::Ok, "limit 0 disables");
     }
 
-    // TEST-S-026 — the shipped ceiling is the number that was decided, and it
+    // The shipped ceiling is the number that was decided, and it
     // cannot silently drift into breaking normal use. Six max-size files, doubled
     // because the relay is charged for every byte twice, in and out.
     #[test]
@@ -3052,10 +3002,10 @@ mod tests {
         assert!(RELAY_FLUSH_BYTES < MAX_RELAY_BYTES / 100, "batching must stay under 1% of the ceiling");
     }
 
-    // TEST-S-031 — a slow-draining subscriber can pin at most ROOM_CHANNEL_CAPACITY
+    // A slow-draining subscriber can pin at most ROOM_CHANNEL_CAPACITY
     // full-size frames in memory, regardless of how long the room lives. Pins the actual
-    // byte ceiling so a future capacity bump cannot silently regress back toward the
-    // ~400 MiB/room the finding reported without this assertion moving too.
+    // byte ceiling so a future capacity bump cannot silently raise it without this
+    // assertion moving too.
     #[test]
     fn test_room_channel_capacity_bounds_pinned_memory() {
         let per_room_ceiling = ROOM_CHANNEL_CAPACITY as u64 * MAX_WS_FRAME as u64;
@@ -3067,7 +3017,7 @@ mod tests {
         assert!(per_address_ceiling < MAX_RELAY_BYTES / 20, "must stay well under the relay ceiling itself");
     }
 
-    // TEST-S-032 — the monitor collector must reject a forged `t_srv` and must
+    // The monitor collector must reject a forged `t_srv` and must
     // never let a raw control byte survive into the batch it prints/logs. Both a
     // real JSON parse and a hand-crafted "valid JSON but not the shape we want"
     // attempt are covered so a future edit can't quietly weaken either half.
@@ -3121,12 +3071,10 @@ mod tests {
         assert_eq!(build_monitor_batch("   \n  \n", 42), "");
     }
 
-    // TEST-S-027 — a third party who knows a live code must not be able to evict the
+    // A third party who knows a live code must not be able to evict the
     // pair. Reaching the attempt cap refuses the connection either way; only an EMPTY
-    // room is destroyed. Regression for the audit finding where three ordinary
-    // connections burned a live room, which both locked the pair out of resuming and
-    // stripped the session's relay ceiling (a charge against a missing room used to
-    // answer Ok).
+    // room is destroyed, so the pair can always resume and the session's relay
+    // ceiling stays in force.
     #[test]
     fn test_attempt_cap_does_not_evict_a_live_pair() {
         // Below the cap: never burned, whatever the headcount.
@@ -3146,8 +3094,8 @@ mod tests {
         assert!(room_retained(false, MAX_CODE_ATTEMPTS, 2), "burned-at attempts, still retained while live");
     }
 
-    // TEST-S-028 — the relay ceiling must fail closed. Losing the room must never be
-    // read as "no limit"; that was the second half of the same finding.
+    // The relay ceiling must fail closed. Losing the room must never be
+    // read as "no limit".
     #[test]
     fn test_relay_budget_fails_closed_without_a_room() {
         let rooms: Rooms = Arc::new(DashMap::new());
@@ -3165,10 +3113,10 @@ mod tests {
         assert_eq!(verdict, RelayBudget::Exceeded, "a missing room must end the session, not uncap it");
     }
 
-    // TEST-S-033 — F10: a connection's uncharged tail (bytes relayed since the last
+    // A connection's uncharged tail (bytes relayed since the last
     // RELAY_FLUSH_BYTES flush) must still be billed to the room when the connection
     // exits, however it exits. Mirrors the post-loop fold in `pair()` directly, the
-    // same style TEST-S-028 above uses for relay_charge's lookup.
+    // same style the relay_charge test above uses for its lookup.
     #[test]
     fn test_relay_tail_is_folded_on_exit() {
         let rooms: Rooms = Arc::new(DashMap::new());
@@ -3206,7 +3154,7 @@ mod tests {
         );
     }
 
-    // TEST-S-034 — F10, the other half: an already-gone room must not panic or
+    // The other half: an already-gone room must not panic or
     // silently invent state. Best-effort exactly like every other post-loop room
     // lookup in `pair()` (the resume-grace bump a few lines below it, for example).
     #[test]

@@ -7,6 +7,17 @@ one version number: the git tag, `server/Cargo.toml` and `crypto/Cargo.toml` alw
 agree. A change to the wire protocol or the key schedule is a major version, because
 two peers on different major versions cannot talk to each other.
 
+## Unreleased
+
+- Self-hosting: TURN relay credentials last the configured session length
+  (`BEEM_SESSION_SECS`) plus 15 minutes, so a longer session keeps its relay
+  path. At the default length nothing changes (75 minutes).
+- A page served from an origin the server does not accept is told so, instead
+  of seeing a generic "connection lost".
+- `HASHES.md` tells you how to find the commit it belongs to, rather than
+  naming one.
+- Source comments describe what the code does today.
+
 ## 1.0.2 — 2026-09-05
 
 - Every transfer operation ends with the session that started it. Leaving a

@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: MIT
 // SPDX-FileCopyrightText: 2026 Scar
 
-// 15.4 SRI — placeholders rewritten by scripts/build-sri.sh on release build.
+// SRI — placeholders rewritten by scripts/build-sri.sh on release build.
 // Until rewritten, runtime check short-circuits with a dev-mode warning.
 const CRYPTO_JS_SRI   = "sha384-ZjzAD+YebCuGOe7gHZquNblaaBfiILnBvgvSR/+J5tCP3ZdV1h8dwYbXnG1m10Ga";
 const CRYPTO_WASM_SRI = "sha384-BV/Jl8gs64GtFz2v8xd/itc+0yPNvoJrWp5QIO0lhnK4WpVqW+zXKXUl7L/4fhxV";
@@ -22,9 +22,9 @@ function sriVersion(sri) {
 }
 
 // Self-host branding arrives as DATA — branding.json — and is
-// applied here, inside the SRI-pinned app.js. It used to be branding.js, an
-// unpinned script that was the first thing the page executed. Empty body or
-// any failure means stock branding; nothing else in the page waits on this.
+// applied here, inside the SRI-pinned app.js, so no unpinned script runs on the
+// page. Empty body or any failure means stock branding; nothing else in the page
+// waits on this.
 (async () => {
     try {
         const r = await fetch("./branding.json", { cache: "no-store" });
@@ -233,7 +233,7 @@ function startRateCountdown(targetEl, totalSeconds) {
     rateCountdownTimer = setInterval(tick, 1000);
 }
 
-// 15.10 App-defined WS close codes — must match server/src/main.rs.
+// App-defined WS close codes — must match server/src/main.rs.
 // Numeric codes survive Cloudflare / reverse proxies; reason strings don't.
 const CLOSE = {
     RATE_COOLDOWN: 4001,
@@ -245,7 +245,11 @@ const CLOSE = {
     PEER_LEFT: 4007,
     NOT_A_MEMBER: 4008, // refused rather than admitted-and-muted
     RELAY_BUDGET: 4009, // this session used up its relay allowance
+    BAD_ORIGIN: 4010,   // the page's origin is not one this server accepts
 };
+// Only a misconfigured self-host reaches this (IRIS_ALLOWED_ORIGINS, SELFHOST.md),
+// so it names the cause instead of the generic "connection lost".
+const ORIGIN_REFUSED_MSG = "This server does not accept connections from this page's address.";
 
 // Reason (when preserved) carries remaining seconds as plain digits.
 function reasonSeconds(reason, fallback) {
@@ -311,7 +315,7 @@ const T_KEEPALIVE = 0x04; // WS heartbeat during DC transfers — keeps tunnel a
 const T_BYE       = 0x05; // immediate vanish signal — peer calls endChatSession() without waiting for server grace
 const T_FILE_NACK = 0x06; // missing chunk indices (uint32 BE each) — receiver→sender retransmit request
 const T_FILE_ACK  = 0x07; // chunk receipt acknowledgement — receiver→sender, one per chunk over WS relay
-const T_FILE_CANCEL = 0x08; // 16.8.2 — payload[0]: 0x00 sender aborted its outgoing file, 0x01 receiver rejects the incoming file. Always sent via WS, so it overtakes queued DC chunks.
+const T_FILE_CANCEL = 0x08; // payload[0]: 0x00 sender aborted its outgoing file, 0x01 receiver rejects the incoming file. Always sent via WS, so it overtakes queued DC chunks.
 const T_FILE_DONE = 0x09; // delivery confirmation — receiver→sender after successful assembly: tid(1) || digestHex(64, optional); flips the sender row "Sent" → "Delivered"
 // WebRTC signaling — travel over existing encrypted WS relay, no server changes needed
 const T_RTC_OFFER = 0x10;
@@ -376,7 +380,7 @@ function drawSecretDigits(n) {
     }
     return out;
 }
-// server-minted proof-of-membership token, so a reconnect after a
+// Server-minted proof-of-membership token, so a reconnect after a
 // network switch (new WS, same room) isn't misclassified as a third-party
 // observer by the server's headcount heuristic. Memory-only — never
 // localStorage, never sessionStorage, never a cookie — it must die with the
@@ -399,10 +403,10 @@ let aborted = false;
 let sessionEnded = false; // Deliberate end-of-chat — suppress the late WS close from resurrecting a view
 let sendCounterWS = 0n;
 let recvCounterWS = -1n; // per-transport strictly increasing; prevents cross-transport replay drops
-// 16.9.2: one counter pair per DC path; nonce[3] = 1 + pathId keeps the four
+// One counter pair per DC path; nonce[3] = 1 + pathId keeps the four
 // counter spaces disjoint from each other and from WS (0x00) — no nonce reuse
 // across paths even though every path encrypts under the same directional key.
-// 16.9.5: DC paths are ordered:false, so frames legitimately arrive out of
+// DC paths are ordered:false, so frames legitimately arrive out of
 // order WITHIN a path — strict-greater would drop the late ones. recvCountersDC
 // is now the highest-seen watermark per path; recvMasksDC is a sliding bitmap
 // (DTLS/IPsec style) of the REPLAY_WINDOW counters below it: bit d set means
@@ -443,14 +447,14 @@ function dcReplayMark(pid, c) {
 }
 
 // WebRTC direct channels — set up after PAKE completes, falls back to WS relay silently.
-// 16.9.2 parallel striping: N independent peer connections (separate SCTP
+// Parallel striping: N independent peer connections (separate SCTP
 // associations — channels on ONE connection would share a single congestion
 // window and gain nothing). File chunks stripe across whichever paths are open,
 // lifting the per-stream window÷RTT ceiling on high-latency links ~N×.
 const DC_PATHS = 4; // Ookla's own floor; more streams self-congest past the sweet spot
 let rtcPaths = []; // pathId → { id, pc, dc, pendingIce } or null
 let useRTC = false;
-// 16.9.1 DataChannel auto-reconnect: on mid-session DC loss the sender (offerer)
+// DataChannel auto-reconnect: on mid-session DC loss the sender (offerer)
 // rebuilds the peer connection with a fresh offer over WS signalling; active
 // chunk loops park on waitDcSettled() instead of silently downgrading to the
 // WS relay. Counters are NOT reset — same AEAD key, nonces must stay unique.
@@ -464,7 +468,7 @@ const DC_RECONNECT_OPEN_MS = 3000;
 let dcReconnecting = false;
 let dcWaiters = [];
 
-// 15.10b Cloudflare Tunnel drops WS close frames — ev.code arrives as 1006.
+// Cloudflare Tunnel drops WS close frames — ev.code arrives as 1006.
 // Server now prepends a "BEEM-CLOSE:<code>:<reason>" text frame before every close.
 // We stash it here so the close handler can fall back when the real frame is lost.
 let preCloseCode = 0;
@@ -475,23 +479,15 @@ let preCloseReason = "";
 // client gets that same window to silently reopen the WS and re-enter chat
 // mode with the existing derivedKey + counters. Deadline is absolute (ms epoch)
 // so repeated reconnect attempts don't extend the total grace.
-// **W — the reconnect window.** The single policy number the rest of the timing
-// derives from: how long a peer may be gone and still come back successfully.
 //
-// 30 → 60 s, after real-device runs in which the phone destroyed
-// its own session at 30 s while the server had not yet even noticed the peer was
-// missing (it reaps at 45 s). The client was giving up before the server started
-// caring — the whole liveness mechanism fired at a party that had already left.
+// The reconnect window: how long a peer may be gone and still come back. Every
+// other resume timer derives from it. It has to outlast the server noticing the
+// peer is missing (the reap, up to 45 s), and must not exceed when the survivor
+// is torn down (reap + RESUME_GRACE_SECS = 75 s), because a return after that
+// finds an empty room. 60 s sits inside that range with 15 s of slack.
 //
-// Bounded above by when the SURVIVOR is torn down: reap (45 s) + RESUME_GRACE_SECS
-// (30 s) = 75 s. Returning after that finds an empty room, so promising more than
-// ~75 s would be promising a reconnect that cannot work. 60 s leaves 15 s of slack.
-//
-// Safe to double only because two things landed first: the client now caps its own
-// attempts (the old backoff would have made 7 attempts in 60 s and walked the
-// user's own IP into a 30-minute ban), and membership is proven by token since membership tokens landed
-// rather than inferred from a headcount, so a longer window no longer widens a
-// misclassification window. Nothing cryptographic changes.
+// A long window is safe because attempts are capped by the budget below, and
+// membership is proven by token rather than inferred from a headcount.
 const RESUME_GRACE_MS = 60_000;
 let resumeUntil = 0;
 let resumeAttempt = 0;   // backoff step within the current grace window
@@ -519,8 +515,8 @@ const RESUME_WINDOW_MS = 60_000; // must track the server's WS_WINDOW_SECS
 // A retry has to land far enough before the window closes to finish connecting.
 const RESUME_LAST_CHANCE_MS = 4_000;
 // How long to let a freshly-announced network settle before spending an attempt
-// on it. Real-device runs had the instant retry fail ~100 ms after
-// `online` fired, then had no budget left for a second try.
+// on it: an instant retry on `online` can fail while the radio is still
+// reattaching, and spend budget a second try would need.
 const ONLINE_SETTLE_MS = 2_500;
 let resumeAttemptTimes = [];
 
@@ -532,13 +528,10 @@ const RESUME_BACKOFF_MS = [0, 6_000, 12_000, 22_000];
 
 // True if another connection attempt fits inside the budget. Prunes as it goes.
 //
-// `lastChance` raises the cap from our self-imposed 4 to the server's real 5.
-// A real-device run: the phone spent all four attempts by 38.8 s, came back
-// onto the network at 38.8 s, its retry there failed because the radio had not
-// finished reattaching — and the budget then deferred the next attempt to 107.9 s,
-// which is 2 s AFTER the 60 s window closed. The session died with the network up
-// and 20 s of window left, because nothing was allowed to try. A window nothing
-// may try inside is not a window.
+// `lastChance` raises the cap from our self-imposed 4 to the server's real 5, so
+// a device that spends its routine attempts early (radio still reattaching) can
+// still make one last try before the window closes instead of being deferred
+// past it.
 function resumeBudgetAvailable(lastChance) {
     const now = Date.now();
     resumeAttemptTimes = resumeAttemptTimes.filter(t => now - t < RESUME_WINDOW_MS);
@@ -548,16 +541,13 @@ function resumeBudgetAvailable(lastChance) {
 let wsKeepaliveTimer = null;
 let wakeLock = null;
 
-// the chip may not claim "Connected" without evidence.
+// The chip may not claim "Connected" without evidence.
 //
 // Every setChatChip call site is reached from an explicit event, so with no event
-// the chip is structurally frozen on whatever it last said. Confirmed on real
-// devices: the receiving PC held "Connected" indefinitely over a session whose
-// peer had walked off WiFi — its own WS was healthy and a blackholed idle
-// DataChannel fires no onclose, so nothing was ever going to tell it.
-//
-// The fix is a timeout path that needs no event: stamp the arrival of any frame
-// from the peer, and let a timer notice when that stamp goes stale.
+// the chip would stay on whatever it last said — and a peer that drops off the
+// network can produce no event at all (our own WS stays healthy, and a blackholed
+// idle DataChannel fires no onclose). So the check needs no event: stamp the
+// arrival of any frame from the peer, and let a timer notice when it goes stale.
 //
 // Split of responsibility: the client is FAST and SOFT, the
 // server is SLOW and AUTHORITATIVE. This warning tears nothing down and clears
@@ -566,12 +556,11 @@ let wakeLock = null;
 // PEER_SILENCE_TIMEOUT_SECS instead of duplicating it.
 //
 // Keepalive cadence is what makes 30 s safe: at 10 s the threshold absorbs two
-// lost keepalives before it speaks. At the old 20 s a single delayed frame put
-// the worst-case gap at 40 s and the chip would have flickered on a healthy link.
+// lost keepalives before it speaks.
 const WS_KEEPALIVE_MS = 10_000;
 const PEER_SILENCE_MS = 30_000;
 const PEER_SILENCE_CHECK_MS = 5_000;
-// how often the transport label re-checks reality. Slow enough to be free,
+// How often the transport label re-checks reality. Slow enough to be free,
 // fast enough that a path change is not displayed as a lie for long.
 const PATH_LABEL_MS = 5_000;
 let lastPeerFrameAt = 0;
@@ -605,13 +594,13 @@ function withType(type, payload) {
 }
 // Returns the authenticated payload (without its type byte) or null when the
 // decrypted type disagrees with the wire byte — or the plaintext is empty,
-// which no honest sender produces after 26.1.
+// which no honest sender produces.
 function authenticatedPayload(wireType, pt) {
     if (pt.length < 1 || pt[0] !== wireType) return null;
     return pt.subarray(1);
 }
 
-// transport: 0 = WebSocket, 1+pathId = DataChannel path (16.9.2) — byte 3 of the
+// Transport: 0 = WebSocket, 1+pathId = DataChannel path — byte 3 of the
 // nonce separates the counter spaces so no nonce repeats across transports/paths
 function makeNonce(counter, transport = 0) {
     if (counter >= COUNTER_MAX) { abort("Session ended: counter exhausted."); return null; }
@@ -760,7 +749,7 @@ $("file-input").addEventListener("change", (e) => {
     e.target.value = "";
 });
 
-$("img-stage-remove").addEventListener("click", clearStagedImage); // 23.8
+$("img-stage-remove").addEventListener("click", clearStagedImage);
 
 // Clipboard paste — intercept only when clipboard contains a file (screenshot, copied file).
 // Text pastes fall through untouched to the textarea.
@@ -858,10 +847,8 @@ function joinAsReceiver() {
 // handshake state is already in memory, so `password` is unused (pass null).
 function openWs(routing, password, resume = false) {
     // Connection accounting: record EVERY connection this client makes, not just the
-    // resume retries. The server's per-IP ladder counts them all, and in
-    // real-device testing a phone made 6 in one 60 s window — enough to trip a cooldown —
-    // while our own counter saw only 4, because the two initial joins were not
-    // recorded.
+    // resume retries. The server's per-IP ladder counts them all, initial joins
+    // included, so our own counter has to as well or it under-counts.
     // The single spare slot we reserve for "an unrelated join" was never going to
     // cover that. Initial joins CONSUME budget but are never blocked by it: a user
     // pairing must not be refused by our own bookkeeping.
@@ -887,7 +874,7 @@ function openWs(routing, password, resume = false) {
     sessionEnded = false; // Fresh connection — re-arm the close handler
 
     const proto = location.protocol === "https:" ? "wss" : "ws";
-    // present the resume token (if we have one) so a reconnect after a
+    // Present the resume token (if we have one) so a reconnect after a
     // network switch proves membership instead of leaning on the server's
     // headcount heuristic. Same query string `code` already travels in, so
     // this adds no new exposure surface.
@@ -946,7 +933,7 @@ function openWs(routing, password, resume = false) {
         msgChain = msgChain.then(() => handleWsMessage(e)).catch(() => {});
     });
     const handleWsMessage = async (e) => {
-        // 15.10b Pre-close marker from server (Cloudflare strips Close frames).
+        // Pre-close marker from server (Cloudflare strips Close frames).
         if (typeof e.data === "string") {
             const m = e.data.match(/^BEEM-CLOSE:(\d+):(.*)$/);
             if (m) {
@@ -954,15 +941,14 @@ function openWs(routing, password, resume = false) {
                 preCloseReason = m[2];
                 return;
             }
-            // server-minted proof-of-membership token for this connection.
+            // Server-minted proof-of-membership token for this connection.
             // Memory-only (see the module-scope declaration) — stash and move on.
             const tok = e.data.match(/^BEEM-TOKEN:([0-9a-f]{32})$/);
             if (tok) {
                 resumeToken = tok[1];
                 return;
             }
-            // 23.7 Peer-presence hints from the relay — chip text only, never state.
-            // the relay allowance for this session is running down. Sent to
+            // The relay allowance for this session is running down. Sent to
             // BOTH peers, once per session. Not an error and not a state change —
             // the session is healthy, it just has a ceiling, and being told before
             // it is reached is the whole point.
@@ -971,6 +957,7 @@ function openWs(routing, password, resume = false) {
                 appendSystemMsg(`(${bud[1]}% of this session's relay allowance used \u2014 a new session starts fresh)`);
                 return;
             }
+            // Peer-presence hints from the relay — chip text only, never state.
             const g = e.data.match(/^BEEM-GRACE:(\d+)$/);
             if (g && step === "chat") {
                 setChatChip("warn", `Peer connection lost — waiting up to ${g[1]} s…`);
@@ -1108,7 +1095,7 @@ function openWs(routing, password, resume = false) {
         if (wsGen !== myGen) return; // stale handler from a replaced WS — ignore
         if (aborted) return;
         if (sessionEnded) return; // Chat already ended deliberately — ignore the late close
-        // 15.10b If the real close frame was stripped (CF Tunnel → 1006), fall back
+        // If the real close frame was stripped (CF Tunnel → 1006), fall back
         // to the text marker the server sent just before closing.
         const rawCode = ev && ev.code;
         const useMarker = rawCode === 1006 && preCloseCode !== 0;
@@ -1148,6 +1135,8 @@ function openWs(routing, password, resume = false) {
                 $("receiver-error").textContent = "That session is already in use by two devices. Ask for a new code.";
             } else if (code === CLOSE.RELAY_BUDGET) {
                 $("receiver-error").textContent = "That session reached its transfer limit. Ask for a new code.";
+            } else if (code === CLOSE.BAD_ORIGIN) {
+                $("receiver-error").textContent = ORIGIN_REFUSED_MSG;
             } else if (code === CLOSE.SESSION_TIMEOUT) {
                 $("receiver-error").textContent = "Session time limit reached.";
             } else {
@@ -1170,6 +1159,8 @@ function openWs(routing, password, resume = false) {
                 txt = "That session is already in use by two devices.";
             } else if (code === CLOSE.RELAY_BUDGET) {
                 txt = "That session reached its transfer limit. Start a new one.";
+            } else if (code === CLOSE.BAD_ORIGIN) {
+                txt = ORIGIN_REFUSED_MSG;
             } else if (code === CLOSE.SESSION_TIMEOUT) {
                 txt = "Session time limit reached.";
             } else {
@@ -1199,7 +1190,7 @@ function abort(reason) {
         $("receiver-error").textContent = reason;
         show("receiver");
     } else {
-        // the sender's intent is still "send", so a failed
+        // The sender's intent is still "send", so a failed
         // pairing mints a fresh code on the spot instead of dead-ending in the
         // fatal view. abort() has already closed the WS and zeroized keys;
         // startSender() opens a clean room (openWs resets `aborted`). If even
@@ -1218,7 +1209,7 @@ function setSessionPath(label) {
     const prev = el.textContent;
     el.textContent = label;
     if (prev && prev !== label) {
-        // re-trigger the animation even if it's already mid-run from a prior change
+        // Re-trigger the animation even if it's already mid-run from a prior change
         el.classList.remove("bm-session-path--changed");
         void el.offsetWidth;
         el.classList.add("bm-session-path--changed");
@@ -1358,9 +1349,8 @@ window.addEventListener("online", () => {
     resumeAttempt = 0;
     // But NOT instantly. `online` means the OS has an interface, not that it can
     // carry a connection — a phone leaving airplane mode is still reattaching to
-    // the radio. Measured twice on real devices: the attempt fired the same
-    // millisecond as `online` and failed 100 ms later, both times, and that wasted
-    // attempt was the last one the budget allowed. Give the radio a moment.
+    // the radio, and an attempt fired the same millisecond can fail and waste
+    // budget. Give the radio a moment.
     if (resumeTimer !== null) clearTimeout(resumeTimer);
     resumeTimer = setTimeout(() => { resumeTimer = null; attemptResume(); }, ONLINE_SETTLE_MS);
 });
@@ -1396,9 +1386,9 @@ function attemptResume() {
     // Each failed connect closes instantly and re-enters here; without spacing
     // that hammers the server and walks our own IP up the cooldown→ban ladder.
     let delay = RESUME_BACKOFF_MS[Math.min(resumeAttempt, RESUME_BACKOFF_MS.length - 1)];
-    // Never schedule a retry past the end of the window. The 22 s final step
-    // overshot a 60 s window in real-device testing — the last retry was booked for 62 s and
-    // the window shut at 60, so the closing 20 seconds contained no attempt at all.
+    // Never schedule a retry past the end of the window: a backoff step that
+    // would land after it is pulled in to the last chance instead, so the closing
+    // seconds of the window always contain an attempt.
     const latest = resumeUntil - RESUME_LAST_CHANCE_MS;
     if (Date.now() + delay > latest) delay = Math.max(1000, latest - Date.now());
     resumeAttempt += 1;
@@ -1438,7 +1428,7 @@ function attemptResume() {
     }, delay);
 }
 
-// 15.9 Peer gone / session ended: disable inputs, flip the header chip to err tone.
+// Peer gone / session ended: disable inputs, flip the header chip to err tone.
 function endChatSession() {
     step = null;
     sessionEnded = true; // Mark deliberate end so the late WS close doesn't resurrect a view
@@ -1446,8 +1436,8 @@ function endChatSession() {
     $("code-input").value = "";
     useRTC = false;
     drainAckWaiters(); // unblock any sendFile/handleFileNack loop waiting on ACK
-    settleDcReconnect(); // abandon any in-flight DC rebuild + wake parked loops (16.9.1)
-    clearRecvStall(); // 21.4 — no watchdog may outlive the session
+    settleDcReconnect(); // abandon any in-flight DC rebuild + wake parked loops
+    clearRecvStall(); // no watchdog may outlive the session
     clearPendingDeliveryTimer(); // same rule for the sender-side confirmation watchdog
     forgetTransferState(); // and no transfer state may either
     stopWsKeepalive();
@@ -1458,9 +1448,9 @@ function endChatSession() {
     zeroizeKeys(); // session over (peer left / timeout) — wipe keys
     resumeToken = ""; // a stale token must never be presented to a new room
     turnConfig = null; // creds are room-scoped; a new room mints its own
-    previewUrls.forEach(u => URL.revokeObjectURL(u)); // 23.3
+    previewUrls.forEach(u => URL.revokeObjectURL(u));
     previewUrls = [];
-    clearStagedImage(); // 23.8 — never leave an unsent image behind
+    clearStagedImage(); // never leave an unsent image behind
     for (const id of ["chat-input", "btn-chat-send", "btn-file-pick"]) {
         const el = $(id);
         if (el) el.disabled = true;
@@ -1500,8 +1490,8 @@ function requestVanish() {
     const btn = $("btn-vanish");
     if (vanishArmTimer !== null) { disarmVanish(); panicVanish(); return; }
     btn.classList.add("bm-vanish-btn--armed");
-    // B2 (launch polish): the arm window silently expiring was a trap — show
-    // the seconds so the second press is an informed one. The button carries
+    // Show the seconds left in the arm window, so the second press is an
+    // informed one rather than a race against a silent expiry. The button carries
     // aria-live, so the countdown also reaches screen readers.
     let remaining = Math.ceil(VANISH_ARM_MS / 1000);
     btn.textContent = `Press again to end (${remaining})`;
@@ -1524,8 +1514,8 @@ function _doVanish() {
     step = null;
     useRTC = false;
     drainAckWaiters();
-    settleDcReconnect(); // 16.9.1: abandon any DC rebuild + wake parked loops
-    clearRecvStall(); // 21.4 — no watchdog may outlive the session
+    settleDcReconnect(); // abandon any DC rebuild + wake parked loops
+    clearRecvStall(); // no watchdog may outlive the session
     clearPendingDeliveryTimer(); // same rule for the sender-side confirmation watchdog
     forgetTransferState(); // and no transfer state may either
     stopWsKeepalive();
@@ -1544,9 +1534,9 @@ function _doVanish() {
     zeroizeKeys(); // panic vanish — overwrite then drop all key material
     resumeToken = ""; // a stale token must never be presented to a new room
     turnConfig = null; // creds are room-scoped; a new room mints its own
-    previewUrls.forEach(u => URL.revokeObjectURL(u)); // 23.3
+    previewUrls.forEach(u => URL.revokeObjectURL(u));
     previewUrls = [];
-    clearStagedImage(); // 23.8 — never leave an unsent image behind
+    clearStagedImage(); // never leave an unsent image behind
     pakeState = null;
     sendCounterWS = 0n;
     recvCounterWS = -1n;
@@ -1582,17 +1572,15 @@ if (fatalRetryBtn) fatalRetryBtn.addEventListener("click", () => location.reload
 // remote description (offer/answer race). Adding them early throws, so each
 // path buffers in path.pendingIce until its remote description is set.
 
-// Self-hosted STUN/TURN (16.7.7): /turn.json is deployment-specific
+// Self-hosted STUN/TURN: /turn.json is deployment-specific
 // (gitignored) so the relay address never enters the repo. Shape:
 // { "urls": ["stun:host:3478", "turn:host:3478?transport=udp"], "username": "...", "credential": "..." }
 // Absent or malformed → fall back to Google STUN (local dev / CI unchanged).
 // A tampered turn.json can only redirect the relay path, which is untrusted by
 // design — media stays E2E encrypted — so this file needs no SRI pin.
 let turnConfig = null;
-// /turn.json used to be fetched here, at page load, by anyone
-// who opened the page — which is exactly why the relay was minting credentials
-// to callers who never paired. It now requires the routing code plus the
-// member token, so it can only run once we are an admitted member of a room.
+// /turn.json requires the routing code plus the member token, so it can only be
+// fetched once we are an admitted member of a room.
 // The token goes in a header rather than the query string so a fronting proxy's
 // access log never records it.
 //
@@ -1642,9 +1630,9 @@ function newDcPath(k) {
 
 function createSenderPath(k) {
     const path = newDcPath(k);
-    // 16.9.5 ordered:false (still reliable): one lost packet no longer freezes
-    // the whole path for a retransmit RTT (SCTP head-of-line blocking) — bench
-    // measured +60% on the lossy mobile relay path. Receiver reassembles by
+    // Ordered:false (still reliable): one lost packet does not freeze
+    // the whole path for a retransmit RTT (SCTP head-of-line blocking), which
+    // matters most on a lossy mobile relay path. Receiver reassembles by
     // chunk index; anti-replay handles the reorder via the sliding window.
     path.dc = path.pc.createDataChannel("beem-" + k, { ordered: false });
     path.dc.binaryType = "arraybuffer";
@@ -1686,21 +1674,17 @@ function closeAllDcPaths() {
 // drain; sends raising the buffer move the baseline without resetting the clock.
 // Per-path high-water mark. BDP on the worst real path (~3 MB/s × ~130 ms) is
 // ~400 KB, so 2 MB never starves the pipe — but it caps queued-yet-undelivered
-// RAM at ~8 MB across 4 paths (the old 8 MB cap let "100%" run ~32–40 MB ahead
-// of the receiver in real-device testing).
+// RAM at ~8 MB across 4 paths, so "100%" on the sender stays close to the
+// receiver.
 const DC_BUFFER_CAP = 2 * 1024 * 1024;
 const DC_STALL_MS = 5000;
 function dcPathStalled(p, now) {
     const b = p.dc.bufferedAmount;
     // b === 0 must reset the clock, not just a decrease: an idle path drains to
     // 0 and then nobody calls pickDcPath() again for as long as the session is
-    // quiet, so lastDrain goes stale. Without this, the FIRST send after any
-    // idle gap > DC_STALL_MS is misread as a stall on the very next pick — the
-    // path is closed on sight with that just-written frame still queued and the
-    // frame is destroyed. Bit 21.4's NACK retransmit (written, then END picks a
-    // path 5 ms later, then close) but it was always latent for any send that
-    // follows a quiet stretch. An empty buffer has nothing to drain, so it can
-    // never be "stalled" — only sustained b > 0 with no drain means a dead route.
+    // quiet, so lastDrain goes stale; the first send after an idle gap must not
+    // be read as a stall. An empty buffer has nothing to drain, so it can never
+    // be "stalled" — only sustained b > 0 with no drain means a dead route.
     if (p.lastBuf === undefined || b < p.lastBuf || b === 0) {
         p.lastBuf = b;
         p.lastDrain = now;
@@ -1728,22 +1712,15 @@ function pickDcPath() {
     return best;
 }
 
-// the transport label is a standing fact, so it has to keep being true.
-//
-// This used to run once, on the first path that opened, and never again: the code
-// said so itself ("label the connection once"). Real-device runs
-// caught the consequence four times — one end saying `direct lan` while
-// the other said `server relay` for the same connection, and the PC still claiming
-// `direct lan` for a connection that had definitively changed.
-//
-// The naming half of the disagreement had a second cause, visible in the code
-// above: `let label = "Direct"` was the DEFAULT, so an end whose `getStats()`
-// returned no nominated pair printed a *different word* than its peer without
-// anything having gone wrong. That is now `direct (unverified)` — a strip that
-// admits it could not check beats two strips quietly disagreeing.
+// The transport label is a standing fact, so it has to keep being true: it is
+// re-derived on a timer, not once at connect, because the path can change under
+// a live session. An end that cannot confirm its pair says `direct (unverified)`
+// rather than guessing — a strip that admits it could not check beats two ends
+// quietly disagreeing.
 //
 // Re-derivation is cheap and setSessionPath only animates on an actual change, so
 // a stable path does not flicker.
+//
 // A transfer stripes across every open channel at once, so the one label the
 // strip shows is only true if it is true of EVERY byte. The label is therefore
 // the weakest route any live channel is using: one channel on TURN makes the
@@ -1763,12 +1740,9 @@ async function derivePathLabel() {
     let live = 0;
     for (const path of open) {
         // A DataChannel stays readyState:"open" while its PeerConnection has
-        // already failed — the zombie-channel case, caught on
-        // the wire: pc0/pc1 went `failed` at 69.5 s while the strip
-        // still counted them and said "direct (unverified)", with 89 MB of that
-        // session's traffic going over the WS relay. "I cannot tell" was honest
-        // and useless; the true answer was "relay". A path whose transport has
-        // failed is not carrying anything, so it does not get a vote.
+        // already failed (a zombie channel), and its traffic is then going over
+        // the WS relay. A path whose transport has failed is not carrying
+        // anything, so it does not get a vote.
         const st = path.pc?.connectionState;
         if (st === "failed" || st === "disconnected" || st === "closed") continue;
         live++;
@@ -1788,26 +1762,18 @@ async function derivePathLabel() {
             if (!pair) {
                 // No transport entry, or it named a pair id absent from this same
                 // report (a stale id read mid-renegotiation) — fall back to a
-                // heuristic. `nominated` alone is not dependable: Chrome reported it
-                // on the first derivation and not on later ones, so re-deriving
-                // turned a perfectly good `direct lan` into `direct (unverified)`
-                // mid-session while ICE was still host/host on all four paths.
-                // Accept a succeeded/selected pair too — that is what the
-                // connection is using. ...but "accept a succeeded pair" was
-                // implemented as "keep whichever succeeded pair the stats map
-                // yields LAST", and a connection routinely has more than one.
-                // Observed on a real device: on all four connections ICE reported
-                // host/host AND srflx/srflx, both `nominated`, simultaneously — so
-                // the printed label depended on map iteration order. Rank the pairs
-                // instead: a relay pair is the WEAKEST answer, not the strongest,
-                // and must never mask a host pair on the same connection. In-use
-                // (nominated/selected) outranks specificity, because a nominated
-                // relay really is what is carrying the bytes even when a host pair
+                // heuristic. `nominated` alone is not dependable (Chrome reports it
+                // on some derivations and not others), so a succeeded/selected pair
+                // counts too. A connection can report several such pairs at once
+                // (host/host and srflx/srflx, both nominated), so the pairs are
+                // ranked rather than taken in map order: a relay pair is the WEAKEST
+                // answer and must never mask a host pair on the same connection, and
+                // in-use (nominated/selected) outranks specificity, because a
+                // nominated relay really is carrying the bytes even when a host pair
                 // merely succeeded.
                 // Still a heuristic, not proof: without selectedCandidatePairId this
                 // can rank a merely-succeeded host/host pair above the relay pair
-                // that is actually in use if neither reports nominated/selected (seen
-                // with a real relay-selected connection on an older stats surface).
+                // that is actually in use if neither reports nominated/selected.
                 let pairRank = -1;
                 stats.forEach(s => {
                     if (s.type !== "candidate-pair") return;
@@ -1838,11 +1804,9 @@ async function derivePathLabel() {
             else if (local?.candidateType === "srflx" || remote?.candidateType === "srflx")
                 label = "p2p (internet)";
             // Peer-reflexive: an address learned from an incoming connectivity
-            // check. It is a real, non-relayed path — a real-device run
-            // had the PC reading host/host while the phone read host/prflx for the
-            // SAME connection, and prflx fell through to "(unverified)". It is not
-            // unverified, it is direct; we just cannot prove it is a LAN, so this
-            // deliberately does not claim "lan".
+            // check. It is a real, non-relayed path (one end of a host/host
+            // connection can see it as host/prflx), so it is direct; we just cannot
+            // prove it is a LAN, so this deliberately does not claim "lan".
             else if (local?.candidateType === "prflx" || remote?.candidateType === "prflx")
                 label = "direct";
             // Never return early on a strong answer: another channel may be on the
@@ -1892,13 +1856,13 @@ function wireDataChannel(path) {
         if (buf.length < 13 || buf.length > MAX_FRAME) return;
         const type = buf[0];
         const nonce = buf.slice(1, 13);
-        // 16.9.2: counter space indexed by the nonce transport byte (1 + pathId),
+        // Counter space indexed by the nonce transport byte (1 + pathId),
         // NOT by arrival channel — a frame replayed onto a different path still
         // lands in its original counter space and dies in the replay window.
         const pid = nonce[3] - 1;
         if (pid < 0 || pid >= DC_PATHS) return;
         const dcCounter = new DataView(nonce.buffer, nonce.byteOffset, 12).getBigUint64(4, false);
-        // 16.9.5 sliding window (unordered DC): reordered-but-fresh passes,
+        // Sliding window (unordered DC): reordered-but-fresh passes,
         // replays and beyond-window frames drop before paying for a decrypt.
         if (!dcReplayFresh(pid, dcCounter)) return;
         let pt;
@@ -1912,7 +1876,7 @@ function wireDataChannel(path) {
     };
 }
 
-// 16.9.1 — DC loss during an active session: rebuild P2P instead of permanently
+// DC loss during an active session: rebuild P2P instead of permanently
 // downgrading to the WS relay. Only the sender can offer; the receiver parks
 // until the sender's reconnect offer reopens the channel or the window lapses.
 function drainDcWaiters() {
@@ -1937,10 +1901,10 @@ function handleDcPathClose(path) {
     // A path dying changes what is true even when others survive — re-derive
     // before the early return, or a degraded session keeps its old label.
     refreshPathLabel();
-    if (useRTC) return; // 16.9.2 graceful degrade — surviving paths carry the transfer
+    if (useRTC) return; // graceful degrade — surviving paths carry the transfer
     if (step !== "chat" || dcReconnecting) return; // teardown, or already rebuilding
     dcReconnecting = true;
-    // transport-path changes are the strip's job now, not the log's — it already
+    // Transport-path changes are the strip's job now, not the log's — it already
     // shows the path continuously, so an event here would just repeat it.
     setSessionPath("reconnecting…");
     if (role === "sender") {
@@ -1980,7 +1944,7 @@ async function rebuildRTC() {
     }
 }
 
-// 16.9.2: park while every open path is above the buffer cap. Stalled paths are
+// Park while every open path is above the buffer cap. Stalled paths are
 // closed as they're found; returns as soon as one path has room, none remain
 // (caller falls back to WS), the transfer is cancelled, or a rebuild starts.
 async function dcBackpressure() {
@@ -2012,8 +1976,7 @@ function dcBufferedTotal() {
 }
 
 // Post-loop drain: "Sent" must mean the buffers are empty, not "chunks queued
-// in RAM" (a real-device run had the receiver ~40 MB behind at "100%" and a
-// kill-chat at that moment destroyed the tail). Stalled paths are closed — their queued
+// in RAM" — otherwise ending the chat right after "100%" would destroy the tail. Stalled paths are closed — their queued
 // chunks are lost, but the receiver's NACK round at T_FILE_END repairs that.
 // Returns on cancel or reconnect too; both leave nothing more to drain here.
 // refs may be null (NACK repair round): drain the buffers without touching a row
@@ -2042,7 +2005,7 @@ function sendSignal(type, jsonStr) {
     const nonce = makeNonce(sendCounterWS, 0);
     if (!nonce) return;
     sendCounterWS += 1n;
-    const plaintext = withType(type, textEnc.encode(jsonStr)); // 26.1 type is inside the AEAD
+    const plaintext = withType(type, textEnc.encode(jsonStr)); // type is inside the AEAD
     let ct;
     try { ct = encrypt(sendKey, nonce, plaintext); } catch (_) { return; }
     const frame = new Uint8Array(1 + 12 + ct.length);
@@ -2054,7 +2017,7 @@ function sendSignal(type, jsonStr) {
 
 async function handleRTCSignal(type, pt) {
     if (typeof RTCPeerConnection === "undefined" || step !== "chat") return;
-    // 16.9.2: every signal is wrapped { p: pathId, d: payload }
+    // Every signal is wrapped { p: pathId, d: payload }
     const msg = JSON.parse(textDec.decode(pt));
     const k = msg.p >>> 0;
     if (k >= DC_PATHS || msg.d === undefined) return;
@@ -2062,7 +2025,7 @@ async function handleRTCSignal(type, pt) {
     if (type === T_RTC_OFFER) {
         let path = ensureRecvPath(k);
         if (path.pc.remoteDescription) {
-            // 16.9.1 reconnect offer — the old peer connection for this path is dead
+            // Reconnect offer — the old peer connection for this path is dead
             try { path.pc.close(); } catch (_) {}
             rtcPaths[k] = null;
             path = ensureRecvPath(k);
@@ -2099,11 +2062,11 @@ async function flushPendingIce(path) {
 
 function sendPayload(type, plaintext) {
     if (step !== "chat") return false;
-    // Chunk frames stripe across open DC paths (16.9.2, least-buffered first);
+    // Chunk frames stripe across open DC paths (least-buffered first);
     // signaling + chat always via WS. HDR/END are WS-only too: a zombie DC
     // (carrier reset under a frozen tab) eats them silently and the receiver
-    // then has no transfer slot to ACK relayed chunks into — sender deadlocks
-    // at the ACK window (seen in real-device testing). earlyChunks replay (16.9.2)
+    // then has no transfer slot to ACK relayed chunks into, and the sender would
+    // wait at the ACK window. earlyChunks replay
     // covers chunks beating the WS header across a faster path.
     const wantsDC = type === T_FILE_CHK;
     const path = wantsDC && useRTC ? pickDcPath() : null;
@@ -2114,7 +2077,7 @@ function sendPayload(type, plaintext) {
     if (path) { sendCountersDC[path.id] += 1n; } else { sendCounterWS += 1n; }
     let ct;
     try {
-        ct = encrypt(sendKey, nonce, withType(type, plaintext)); // 26.1 type is inside the AEAD
+        ct = encrypt(sendKey, nonce, withType(type, plaintext)); // type is inside the AEAD
     } catch (_) {
         appendSystemMsg("(encrypt failed)");
         return false;
@@ -2147,8 +2110,8 @@ async function sendCtrlFrame(type, payload) {
     return false;
 }
 
-// 23.8 — images are staged for confirmation instead of being sent on sight: an
-// accidental Ctrl+V used to transmit a screenshot with no undo. Non-image files
+// Images are staged for confirmation instead of being sent on sight, so an
+// accidental Ctrl+V never transmits a screenshot with no undo. Non-image files
 // keep the send-on-pick behaviour. Display-only; the transfer path is unchanged.
 let stagedImage = null;
 let stagedImageUrl = null;
@@ -2218,10 +2181,10 @@ function sendChat() {
 }
 
 function handleChatPayload(type, pt) {
-    // the single choke point every inbound AEAD frame passes through, from
+    // The single choke point every inbound AEAD frame passes through, from
     // either lane (WS relay and DataChannel both land here). Stamping it rather
     // than the two call sites is what makes T_KEEPALIVE meaningful: its entire
-    // handling below is `return`, so before this it could detect nothing at all.
+    // handling below is `return`, so the stamp is the only thing it does.
     notePeerFrame();
     if (type === T_TEXT) {
         appendChatMsg("in", textDec.decode(pt));
@@ -2251,7 +2214,7 @@ function handleChatPayload(type, pt) {
     console.warn(`[iris] unknown frame type 0x${type.toString(16)}`); appendSystemMsg("(a message was ignored for your safety)");
 }
 
-// 23.9 — inline SVGs for the per-message copy button (same clipboard glyph as the
+// Inline SVGs for the per-message copy button (same clipboard glyph as the
 // pairing-code copy button, plus a check for the copied state). Static strings, no
 // user data, so innerHTML is safe here.
 const COPY_ICON_SVG =
@@ -2300,7 +2263,7 @@ function appendChatMsg(direction, text) {
     // surface colour already carry direction, and the word doubled the meta.
     const timeText =
         new Date().toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
-    // 23.1 — long messages collapse with a fade + toggle, no auto-scroll on toggle
+    // Long messages collapse with a fade + toggle, no auto-scroll on toggle
     if (text.length > 600) {
         // A collapsed bubble would hide an in-bubble stamp below the fade, so
         // long messages keep theirs on the actions row beside the toggle.
@@ -2327,8 +2290,8 @@ function appendChatMsg(direction, text) {
         bubble.dataset.time = timeText;
     }
     if (actions.childNodes.length) wrap.appendChild(actions);
-    // 23.2 — per-message copy button; hidden when Clipboard API is unavailable.
-    // 23.9 — icon instead of "Copy" text: quiet clipboard glyph, green check on copy.
+    // Per-message copy button; hidden when Clipboard API is unavailable.
+    // Icon instead of "Copy" text: quiet clipboard glyph, green check on copy.
     if (navigator.clipboard && navigator.clipboard.writeText) {
         const copyBtn = document.createElement("button");
         copyBtn.type = "button";
@@ -2393,7 +2356,7 @@ function fmtBytes(n) {
     return `${(n / 1024 / 1024).toFixed(2)} MB`;
 }
 
-// 23.3 — MIME is never sent on the wire; infer preview eligibility from the
+// MIME is never sent on the wire; infer preview eligibility from the
 // filename extension alone (display-only, no effect on transfer).
 // The peer picks the filename, the browser saves under it. The
 // name is only ever DISPLAYED via textContent (no markup risk), but
@@ -2447,14 +2410,13 @@ function imageMimeFor(name) {
 
 function appendFileRow(name, sizeBytes, direction, onCancel) {
     const row = document.createElement("div");
-    // B3: --active pins the in-flight card (position: sticky) so heavy texting
+    // --active pins the in-flight card (position: sticky) so heavy texting
     // can never scroll a live transfer out of sight. Dropped at terminal state.
     row.className = `bm-file-row bm-file-row--${direction} bm-file-row--active`;
 
     const nameEl = document.createElement("div");
     nameEl.className = "bm-file-name";
-    // 16.8.1 — direction used to be a ↑/↓ glyph; it now reads from the side the
-    // card sits on and its surface colour, exactly as the message bubbles do.
+    // Direction reads from the side the card sits on and its surface colour, exactly as the message bubbles do.
     nameEl.textContent = displayName(name); // No bidi/invisible spoof in the UI
     nameEl.title = displayName(name);
 
@@ -2462,7 +2424,7 @@ function appendFileRow(name, sizeBytes, direction, onCancel) {
     icon.className = "bm-file-icon";
     icon.innerHTML = FILE_ICON_SVG;
 
-    // 16.8.2 — one action slot on the trailing edge: ✕ while in flight, swapped for
+    // One action slot on the trailing edge: ✕ while in flight, swapped for
     // the download arrow once a received file is assembled. Emptied by
     // completeFileRow/failFileRow once the transfer reaches a terminal state.
     let cancelBtn = null;
@@ -2481,7 +2443,7 @@ function appendFileRow(name, sizeBytes, direction, onCancel) {
 
     const meta = document.createElement("div");
     meta.className = "bm-file-meta";
-    // B3: the whole chat log is aria-live=polite; without this, every percent
+    // The whole chat log is aria-live=polite; without this, every percent
     // tick is read aloud — a screen reader cannot talk over a transfer. The
     // filename still announces once when the card lands (it sits outside this).
     meta.setAttribute("aria-live", "off");
@@ -2525,7 +2487,7 @@ function removeCancelBtn(refs) {
 // past the card width, where it wrapped to two lines mid-transfer.
 const IMPLIED_FILE_LABELS = new Set(["Sending", "Receiving"]);
 
-// a status message and a progress readout want opposite things from this
+// A status message and a progress readout want opposite things from this
 // one line. The readout is a fixed shape rewritten every second, so it must stay
 // on one line or the progress bar shifts under it (the reasoning behind
 // .bm-file-meta's nowrap in style.css). A status message is written once at a
@@ -2581,7 +2543,7 @@ function completeFileRow(refs, totalBytes, finalLabel) {
     // A full bar pinned to the card's bottom edge just read as a border. On a
     // finished transfer the bar retires and the file icon carries the done state.
     refs.row.classList.add("bm-file-row--done");
-    refs.row.classList.remove("bm-file-row--active"); // B3: done cards scroll normally
+    refs.row.classList.remove("bm-file-row--active"); // done cards scroll normally
     // A delivered card must never keep the grey "waiting" bar styling underneath.
     refs.row.classList.remove("bm-file-row--pending");
     setFileMeta(refs, `${finalLabel} \u00b7 ${fmtBytes(totalBytes)}`, false);
@@ -2589,7 +2551,7 @@ function completeFileRow(refs, totalBytes, finalLabel) {
 
 function failFileRow(refs, message) {
     removeCancelBtn(refs);
-    refs.row.classList.remove("bm-file-row--active"); // B3: terminal cards unpin
+    refs.row.classList.remove("bm-file-row--active"); // terminal cards unpin
     // Whatever the terminal state (cancelled, incomplete, aborted), it's no
     // longer "waiting" \u2014 same reasoning as completeFileRow above.
     refs.row.classList.remove("bm-file-row--pending");
@@ -2678,10 +2640,10 @@ function attachChecksum(refs, hex, verdict) {
 }
 
 // ---- File transfer ----
-const CHUNK_SIZE = 128 * 1024; // 128 KB → encrypted frame ~128 KB + 35 B (26.1: +1 type byte inside), safely under Chrome DC 256 KB max
+const CHUNK_SIZE = 128 * 1024; // 128 KB → encrypted frame ~128 KB + 35 B (+1 type byte inside), safely under Chrome DC 256 KB max
 const MAX_FILE_SIZE = 1 * 1024 * 1024 * 1024; // 1 GB
-const MAX_PREVIEW_SIZE = 10 * 1024 * 1024; // 10 MB — 23.3 inline image preview cap
-// 23.3 — object URLs backing inline thumbnails (sender + receiver); revoked wholesale on session teardown
+const MAX_PREVIEW_SIZE = 10 * 1024 * 1024; // 10 MB — inline image preview cap
+// Object URLs backing inline thumbnails (sender + receiver); revoked wholesale on session teardown
 let previewUrls = [];
 
 // T_FILE_END payload: tid(1 byte) || digestHex(64 bytes UTF-8), or just tid(1 byte)
@@ -2700,7 +2662,7 @@ function fileEndPayload(tid, digestHex) {
 // Sender-side
 async function sendFile(file) {
     if (step !== "chat") return;
-    // 16.9.6 single-transfer guard: a second send while one is active destroys
+    // Single-transfer guard: a second send while one is active destroys
     // the receiver's single recvFile slot and risks cross-transfer corruption.
     if (sendActive) {
         $("file-status").textContent = "One file at a time — wait for the current send to finish.";
@@ -2753,10 +2715,10 @@ async function sendFile(file) {
         sendCancelMsg = "Cancelled";
         sendPayload(T_FILE_CANCEL, new Uint8Array([0x00])); // tell peer to discard its partial
         drainAckWaiters(); // wake a parked window wait so the loop can observe the flag
-        drainDcWaiters();  // likewise a loop parked on a DC reconnect (16.9.1)
+        drainDcWaiters();  // likewise a loop parked on a DC reconnect
     });
     currentSendRefs = refs;
-    // 23.3 — inline thumbnail from the picked File; display-only, must never affect the transfer.
+    // Inline thumbnail from the picked File; display-only, must never affect the transfer.
     try {
         const mime = imageMimeFor(file.name) || (file.type && file.type.startsWith("image/") ? file.type : null);
         if (mime && file.size <= MAX_PREVIEW_SIZE) {
@@ -2773,13 +2735,13 @@ async function sendFile(file) {
     let sentBytes = 0;
     // Sliding 1-second window: array of [timestamp, bytes] samples
     let speedSamples = [];
-    // 21.2 — streaming checksum: each chunk hashed once as it's read, no
+    // Streaming checksum: each chunk hashed once as it's read, no
     // second full-file buffer/read needed at the end.
     const hasher = new Sha256Stream();
 
     for (let i = 0; i < totalChunks; i++) {
         if (sendCancelled) break;
-        // 16.9.1: DC dropped mid-transfer — park until the rebuild settles
+        // DC dropped mid-transfer — park until the rebuild settles
         // (reopened → resume via DC; gave up → chunks route via WS below).
         if (dcReconnecting) {
             // The bar would otherwise sit frozen at the last byte and read as a
@@ -2795,7 +2757,7 @@ async function sendFile(file) {
         const buf = new Uint8Array(await slice.arrayBuffer());
         if (gone()) return; // the read outlived the session — this chunk goes nowhere
         if (sendCancelled) break;
-        hasher.update(buf); // 21.2 — hash in-flight, index order, once per chunk
+        hasher.update(buf); // hash in-flight, index order, once per chunk
         const payload = new Uint8Array(1 + 4 + buf.length);
         payload[0] = tid;
         new DataView(payload.buffer).setUint32(1, i, false);
@@ -2857,7 +2819,7 @@ async function sendFile(file) {
     lastSentFile = file; // held so handleFileNack can re-read slices on retransmit request
     lastSentTid = tid;
     resentBytes = 0; // fresh transfer, fresh retransmit budget
-    // 21.2's streamed digest is finalized here — before END goes out, not after —
+    // The streamed digest is finalized here — before END goes out, not after —
     // so it can ride inside the END frame itself. Every chunk was already hashed in
     // the loop above (this only runs once the loop is done and sendCancelled is
     // false), so finalizing early changes nothing about the result, only when it's
@@ -2866,7 +2828,7 @@ async function sendFile(file) {
     try { cs = hasher.finalize_hex(); } catch (_) {}
     lastSentDigestHex = cs; // read back by handleFileDone's comparison and handleFileNack's END resend
     // Not awaited: a dead WS would park the retry for its full window and hold
-    // the row on "Sending" with every chunk already gone. The receiver's 21.4
+    // the row on "Sending" with every chunk already gone. The receiver's END-loss
     // watchdog backstops an END that never lands.
     sendCtrlFrame(T_FILE_END, fileEndPayload(tid, cs)).catch(() => {});
     endSendGuard(); // re-enable on "Sent" — NACK rounds for this transfer stay valid via lastSentTid
@@ -2883,7 +2845,7 @@ async function sendFile(file) {
 // WS relay ACK-window flow control.
 // Sender tracks how many chunks are in-flight (sent but not yet ACKed by receiver).
 // When in-flight hits ACK_WINDOW the sender suspends until an ACK arrives, keeping
-// the server's broadcast ring buffer well under its 2048-frame limit regardless of
+// the server's broadcast ring buffer (256 frames) well under its limit regardless of
 // how much faster the sender is than the receiver.
 const ACK_WINDOW = 32; // max chunks in flight over WS relay (~4 MB)
 let wsChunksInFlight = 0;
@@ -2943,7 +2905,7 @@ function forgetTransferState() {
     earlyChunks = [];
     earlyEndPt = null;
 }
-// 16.9.6 single-transfer guard + per-transfer ID (1 byte, wraps mod 256).
+// Single-transfer guard + per-transfer ID (1 byte, wraps mod 256).
 // The ID stamps HDR/CHK/END/NACK so stray in-flight frames from a finished or
 // superseded transfer can never land inside the next file's parts.
 let sendActive = false;
@@ -2955,30 +2917,21 @@ function endSendGuard() {
 }
 // Sender-side: { refs, size } after T_FILE_END — handleFileDone flips it to "Delivered"
 let pendingDelivery = null;
-// Mirror of the 21.4 receiver watchdog above, for the sender's own blind spot:
-// T_FILE_DONE (the receiver's assembly confirmation) can be lost same as END —
-// same relay, same paths. Without this the card just sits on "Sent · waiting
-// for confirmation" forever, indistinguishable from a UI that stopped updating.
 // The receiver's END-grace ceiling. Declared here rather than inline in endGraceMs()
-// because the sender's confirmation budget below is derived from it — the whole bug
-// this replaces was two constants that governed the same window and had never been
-// reconciled (10 s was written before the grace gained its 8 s ceiling).
+// because the sender's confirmation budget below is derived from it, so the two can
+// never govern the same window with different numbers.
 const END_GRACE_MAX_MS = 8_000;
 // What the receiver can legitimately spend after the sender's last byte, before it can
 // even begin to answer: up to END_GRACE_MAX_MS waiting for late chunks, then Blob
-// assembly + SHA-256 over the whole file, then the trip back. Real-device testing
-// measured that window at 14.2 s, 18.3 s and 11.8 s on 124–319 MB files — every one
-// past a flat 10 s deadline, so the app accused three healthy transfers of possibly
-// not arriving. Derive it instead of guessing.
+// assembly + SHA-256 over the whole file, then the trip back. On large files that is
+// well over 10 s, so it is derived from the size rather than guessed.
 //
-// HASH_FLOOR_BPS is deliberately a FLOOR, not the measured rate: real-device runs hashed
-// at ~220–265 MB/s on a laptop, and a budget phone must not be called a liar for being
-// four times slower. Ceiling stays at the server's own silence timeout (45 s) — past
-// that a genuinely absent peer is reported by the transport, which knows, rather than
-// guessed at by this timer, which does not.
-// No explicit floor: END_GRACE_MAX_MS + PENDING_DELIVERY_RTT_MS is 13 s by
-// construction, already above the 10 s this replaces, so a `Math.max` floor would be
-// a constant that can never bind.
+// HASH_FLOOR_BPS is deliberately a FLOOR, well under what a laptop hashes at, so a
+// budget phone is not reported as silent for being several times slower. Ceiling stays
+// at the server's own silence timeout (45 s) — past that a genuinely absent peer is
+// reported by the transport, which knows, rather than guessed at by this timer, which
+// does not. No explicit floor: END_GRACE_MAX_MS + PENDING_DELIVERY_RTT_MS is already
+// 13 s by construction.
 const PENDING_DELIVERY_MAX_MS = 45_000;
 const PENDING_DELIVERY_RTT_MS = 5_000;    // relayed round trip + Blob assembly
 const HASH_FLOOR_BPS = 50 * 1024 * 1024;
@@ -2987,6 +2940,10 @@ function pendingDeliveryMs(size) {
     const hashMs = ((size > 0 ? size : 0) / HASH_FLOOR_BPS) * 1000;
     return Math.min(PENDING_DELIVERY_MAX_MS, Math.ceil(END_GRACE_MAX_MS + hashMs + PENDING_DELIVERY_RTT_MS));
 }
+// The sender's counterpart to the receiver's END-loss watchdog (armRecvStall):
+// T_FILE_DONE (the receiver's assembly confirmation) can be lost the same way END
+// can — same relay, same paths. Without a timer the card would sit on "Sent" forever,
+// indistinguishable from a UI that stopped updating.
 let pendingDeliveryTimer = null;
 // Timestamp, not a boolean: a repair round exits through five different returns
 // (cancel, supersede, dead socket, step change, tid mismatch) and a flag would leak
@@ -3010,47 +2967,37 @@ function armPendingDeliveryTimer() {
         pendingDeliveryTimer = null;
         if (pendingDelivery !== p) return; // delivered, cancelled or superseded already
         // A repair round in progress is the transfer WORKING, not the peer going
-        // silent — and it is the reason this message fired on three healthy
-        // transfers in real-device testing (4.2 s, 8.3 s and 1.7 s on screen,
-        // every one of them on a run that finished over a relay). Re-arm instead of
-        // accusing; if the repair really has died the stamp goes stale and the next
-        // expiry says so.
+        // silent. Re-arm instead of reporting; if the repair really has died the
+        // stamp goes stale and the next expiry says so.
         if (Date.now() - repairActiveAt < REPAIR_QUIET_MS) { armPendingDeliveryTimer(); return; }
         // Calm, not alarmed: nothing here says the transfer failed, because we
         // don't know that — only that the one signal which would say "arrived"
-        // hasn't shown up. "It may not have arrived" was dropped from the tooltip:
-        // it asserted more than this timer can know, and it lived in
-        // a `title` that a phone can never show — no hover on touch — so the only
-        // part a mobile user ever saw was the alarming half with none of the
-        // context. Say exactly what is true, in the visible line.
-        // Was a direct textContent write, which skipped setFileMeta and therefore
-        // could never receive the wrapping class — measured CLIPPED on the phone in
-        // real-device testing.
+        // hasn't shown up. Say exactly that, in the visible line (a `title` tooltip
+        // never shows on touch). Goes through setFileMeta so it gets the wrapping
+        // class and is not clipped on a narrow screen.
         setFileMeta(p.refs, "Sent \u00b7 peer has not confirmed yet", true);
         p.refs.meta.title =
             "Every byte was sent. Your peer has not confirmed assembling the file yet.";
     }, pendingDeliveryMs(p.size));
 }
-// 16.8.2 cancel state
+// Cancel state
 let sendCancelled = false;   // observed by the sendFile/handleFileNack loops; reset at sendFile start
 let sendCancelMsg = "";      // terminal row label ("Cancelled" vs "Cancelled by peer")
 let currentSendRefs = null;  // outgoing row refs so a peer-initiated cancel can mark the card
 let dropStrayChunks = false; // after an incoming cancel, late in-flight chunks are expected — drop them silently
-// 16.9.2: with striped paths, chunks (or even T_FILE_END) on a fast path can
+// With striped paths, chunks (or even T_FILE_END) on a fast path can
 // arrive before the header that went on a slower one — stash and replay on HDR.
 let earlyChunks = [];
-let earlyEndPt = null; // full payload of an END that beat its header across paths (16.9.2) — kept
+let earlyEndPt = null; // full payload of an END that beat its header across paths — kept
                         // whole, not just its tid, so a digest riding inside it survives the replay
 const EARLY_CHUNK_CAP = 256; // 32 MB of path skew — far beyond any real race
-// 21.4 — END-frame loss watchdog. T_FILE_END rides a DC path like any file
-// frame (sendPayload return ignored at the send site), and a stalled path
-// closed with END still queued in its buffer (pickDcPath / dcBackpressure /
-// dcDrainBuffers all close-on-sight) loses it silently. The NACK repair round
-// only ever ran from handleFileEnd, so a lost END left the receiver sitting
-// incomplete forever and the sender on "Sent" — the only other END source is
-// handleFileNack's tail, which needs a NACK, which needed the END: circular.
+// END-frame loss watchdog. T_FILE_END goes over the WS relay (sendCtrlFrame), but
+// it is still a single frame, and the NACK repair round only runs from
+// handleFileEnd — so an END that never lands would leave the receiver incomplete
+// and the sender on "Sent", with nothing to break the wait (the only other END
+// source is handleFileNack's tail, which itself needs a NACK).
 // This timer notices "transfer open + no accepted chunk for RECV_STALL_MS"
-// and walks into handleFileEnd on its own initiative; the 16.9.5 END grace,
+// and walks into handleFileEnd on its own initiative; the END grace,
 // NACK rounds and the nackAttempts cap then behave exactly as if the END had
 // arrived, so a dead sender still terminates at honest "Incomplete".
 // The legitimate zero-chunk gaps this must clear are the 1 s END grace, the 5 s
@@ -3074,7 +3021,7 @@ function armRecvStall() {
     if (!f) return;
     recvStallTimer = setTimeout(() => {
         recvStallTimer = null;
-        if (step !== "chat" || recvFile !== f) return; // torn down or superseded (16.9.6)
+        if (step !== "chat" || recvFile !== f) return; // torn down or superseded
         handleFileEnd(new Uint8Array([f.tid])); // body is await-free — recvFile is settled on return
         if (recvFile === f) armRecvStall(); // grace/NACK round still open — keep watching
     }, RECV_STALL_MS);
@@ -3097,8 +3044,8 @@ function handleFileHdr(pt) {
         return;
     }
     const name = textDec.decode(pt.slice(11, 11 + nameLen));
-    // 16.9.6: single recvFile slot — a new header supersedes the old transfer
-    // EXPLICITLY (it used to be silently destroyed) and the tid checks below
+    // Single recvFile slot — a new header supersedes the old transfer
+    // explicitly, and the tid checks below
     // keep its still-in-flight chunks out of the new file's parts.
     if (recvFile) {
         const old = recvFile;
@@ -3110,7 +3057,7 @@ function handleFileHdr(pt) {
         if (!recvFile || recvFile.refs !== refs) return; // stale button (already terminal)
         const f = recvFile;
         recvFile = null;
-        clearRecvStall(); // 21.4
+        clearRecvStall();
         dropStrayChunks = true; // chunks already in flight will keep landing — expected
         earlyChunks = [];
         earlyEndPt = null;
@@ -3118,7 +3065,7 @@ function handleFileHdr(pt) {
         failFileRow(f.refs, "Cancelled");
     });
     recvFile = { tid, name, size, totalChunks: Math.max(1, Math.ceil(size / CHUNK_SIZE)), nackAttempts: 0, nackRounds: 0, receivedAtLastNack: -1, repairNoticed: false, parts: [], received: 0, refs, speedSamples: [] };
-    // Replay anything that beat this header across a faster path (16.9.2);
+    // Replay anything that beat this header across a faster path;
     // the tid check in handleFileChunk drops stashed frames from other transfers.
     const replay = earlyChunks;
     earlyChunks = [];
@@ -3128,21 +3075,20 @@ function handleFileHdr(pt) {
     // Replay the real payload (not a reconstructed bare tid) so a digest that beat
     // the header across a faster path still reaches the comparison below.
     if (earlyPt && earlyPt.length >= 1 && earlyPt[0] === tid) handleFileEnd(earlyPt);
-    armRecvStall(); // 21.4 — no-ops if the early END above already finished the transfer
+    armRecvStall(); // no-ops if the early END above already finished the transfer
 }
 
 function handleFileChunk(pt) {
     if (pt.length < 5) return;
     if (!recvFile) {
         if (!dropStrayChunks && earlyChunks.length < EARLY_CHUNK_CAP) {
-            earlyChunks.push(pt); // header still in flight on another path (16.9.2)
+            earlyChunks.push(pt); // header still in flight on another path
         }
         return;
     }
     if (pt[0] !== recvFile.tid) {
-        // Stray chunk from a finished/superseded transfer (16.9.6) — before the
-        // tid stamp these landed inside the current file's parts (silent
-        // corruption, caught only by the SHA-256 lines). Still ACK it so the
+        // Stray chunk from a finished/superseded transfer: the tid stamp keeps it
+        // out of the current file's parts. Still ACK it so the
         // sender's WS flow-control window can't leak a slot (same rationale as
         // the duplicate branch below).
         sendPayload(T_FILE_ACK, new Uint8Array(0));
@@ -3153,14 +3099,9 @@ function handleFileChunk(pt) {
     // balloon to idx entries on assembly. No ACK: honest senders never send one.
     if (idx >= recvFile.totalChunks) return;
     // A chunk can never exceed CHUNK_SIZE — the sender slices to exactly that, so
-    // an honest peer cannot reach this. Unchecked, the length was the hole in 21.1's
-    // ceiling: that check gates the DECLARED size, and parts[] would then hold up to
-    // ~1.56x it (MAX_FRAME payload / CHUNK_SIZE) for a size that was accepted as
-    // fitting in RAM. It also let `received` — a plain byte sum — reach `size` with
-    // parts still missing, which walks straight past every `received !== size` gate
-    // in handleFileEnd: the file assembles from a holed parts[], reports "Received",
-    // and the digest is silently skipped (the hasher throws into its own catch and
-    // leaves cs empty, so no verdict is ever shown on either end).
+    // an honest peer cannot reach this. Bounding each chunk keeps parts[] within the
+    // declared size the RAM check accepted, and keeps `received` (a plain byte sum)
+    // an honest measure of completeness for the `received !== size` gates below.
     if (pt.length - 5 > CHUNK_SIZE) return; // no ACK: same rationale as the index check
     const data = pt.slice(5);
     if (recvFile.parts[idx] !== undefined) {
@@ -3181,7 +3122,27 @@ function handleFileChunk(pt) {
     recvFile.speedSamples = recvFile.speedSamples.filter(s => t - s[0] <= 1000);
     const bps = recvFile.speedSamples.reduce((a, s) => a + s[1], 0);
     updateFileRow(recvFile.refs, recvFile.received, recvFile.size, "Receiving", bps);
-    armRecvStall(); // 21.4 — every accepted chunk resets the END-loss watchdog
+    armRecvStall(); // every accepted chunk resets the END-loss watchdog
+}
+
+// Consecutive NACK rounds that moved zero bytes before the transfer is declared
+// dead, and a hard ceiling on total rounds so a pathological trickle still ends.
+const MAX_NACK_NO_PROGRESS = 3;
+const MAX_NACK_ROUNDS = 32;
+
+// END rides the fast WS lane while bulk chunks are still draining on the DC lane,
+// so "missing at END" scales with how much is still in flight — a constant is the
+// wrong shape: a fixed 1 s re-requests chunks that are simply still arriving.
+// Floor 1 s covers a small tail (and matches SCTP's own rationale for a 1 s RTO
+// floor: never mistake late for lost). Ceiling 8 s stays clear of RECV_STALL_MS
+// (60 s) and the DC rebuild park. No recent samples means nothing is arriving —
+// repair immediately rather than stalling on a dead path.
+function endGraceMs(f) {
+    const now = Date.now();
+    const bps = f.speedSamples.filter(s => now - s[0] <= 1000).reduce((a, s) => a + s[1], 0);
+    if (bps <= 0) return 1000;
+    const outstanding = Math.max(0, f.size - f.received);
+    return Math.max(1000, Math.min(END_GRACE_MAX_MS, Math.ceil((outstanding / bps) * 1500)));
 }
 
 async function handleFileEnd(pt) {
@@ -3192,33 +3153,12 @@ async function handleFileEnd(pt) {
     // plain display rather than guess or throw.
     const senderDigestHex = pt && pt.length === 1 + 64 ? textDec.decode(pt.slice(1)) : null;
     if (!recvFile) {
-        if (!dropStrayChunks) earlyEndPt = pt; // END beat the header across paths (16.9.2)
+        if (!dropStrayChunks) earlyEndPt = pt; // END beat the header across paths
         return;
     }
-    if (tid !== recvFile.tid) return; // stray END from a superseded transfer (16.9.6)
+    if (tid !== recvFile.tid) return; // stray END from a superseded transfer
     const f = recvFile;
-    // Consecutive NACK rounds that moved zero bytes before the transfer is declared
-// dead, and a hard ceiling on total rounds so a pathological trickle still ends.
-const MAX_NACK_NO_PROGRESS = 3;
-const MAX_NACK_ROUNDS = 32;
-
-// END rides the fast WS lane while bulk chunks are still draining on the DC lane,
-// so "missing at END" scales with how much is still in flight — a constant is the
-// wrong shape. Real-device case: a 124-chunk repair round re-requested 70 chunks that
-// were simply still arriving, because 1 s drains ~8 MB and ~15.5 MB was outstanding.
-// Floor 1 s keeps the old behaviour for a small tail (and matches SCTP's own
-// rationale for a 1 s RTO floor: never mistake late for lost). Ceiling 8 s stays
-// clear of RECV_STALL_MS (60 s) and the DC rebuild park. No recent samples means
-// nothing is arriving — repair immediately rather than stalling on a dead path.
-function endGraceMs(f) {
-    const now = Date.now();
-    const bps = f.speedSamples.filter(s => now - s[0] <= 1000).reduce((a, s) => a + s[1], 0);
-    if (bps <= 0) return 1000;
-    const outstanding = Math.max(0, f.size - f.received);
-    return Math.max(1000, Math.min(END_GRACE_MAX_MS, Math.ceil((outstanding / bps) * 1500)));
-}
-
-// 16.9.5 unordered DC: a tiny END routinely overtakes large fragmented
+    // Unordered DC: a tiny END routinely overtakes large fragmented
     // chunks still in flight on its path (unordered = deliver-on-assembly),
     // so "missing at END" usually means "still arriving". One short grace
     // before each NACK round keeps transfers from always ending in a spurious
@@ -3272,7 +3212,7 @@ function endGraceMs(f) {
         }
     }
     recvFile = null;
-    clearRecvStall(); // 21.4 \u2014 transfer terminal either way below
+    clearRecvStall(); // transfer terminal either way below
     if (f.received !== f.size) {
         settleSystemMsg(f.repairMsgEl, "(some pieces never arrived)");
         failFileRow(f.refs, `Incomplete \u00b7 ${fmtBytes(f.received)} / ${fmtBytes(f.size)}`);
@@ -3281,7 +3221,7 @@ function endGraceMs(f) {
     // Every piece is here: the verification that line announced is finished, so
     // it stops saying it is still running.
     settleSystemMsg(f.repairMsgEl, "(missing pieces recovered)");
-    // 23.3 — image previews get a typed Blob so the <img> renders; non-image
+    // Image previews get a typed Blob so the <img> renders; non-image
     // behavior (untyped Blob, revoke-on-download-click) stays byte-identical.
     const previewMime = imageMimeFor(f.name);
     const isPreviewable = previewMime && f.size <= MAX_PREVIEW_SIZE;
@@ -3290,9 +3230,9 @@ function endGraceMs(f) {
 
     completeFileRow(f.refs, f.size, "Received");
 
-    // 21.2 — streamed digest over the already-assembled parts, in index order,
+    // Streamed digest over the already-assembled parts, in index order,
     // instead of re-reading the assembled blob whole. Computed here, before DONE
-    // goes out (it used to run after), so DONE can carry it back to the sender —
+    // goes out, so DONE can carry it back to the sender —
     // no extra round trip needed for either side to verify.
     let cs = "";
     try {
@@ -3390,7 +3330,7 @@ function handleFileDone(pt) {
     pendingDelivery = null;
 }
 
-// 16.8.2 — peer cancelled a transfer. payload[0]: 0x00 = peer aborted the file
+// Peer cancelled a transfer. payload[0]: 0x00 = peer aborted the file
 // it was sending to us (discard our partial); 0x01 = peer rejects the file we
 // are sending (stop the loop; forget the file so NACK rounds can't resurrect it).
 function handleFileCancel(pt) {
@@ -3401,7 +3341,7 @@ function handleFileCancel(pt) {
         if (!recvFile) { dropStrayChunks = true; return; }
         const f = recvFile;
         recvFile = null;
-        clearRecvStall(); // 21.4
+        clearRecvStall();
         dropStrayChunks = true;
         failFileRow(f.refs, "Cancelled by peer");
         return;
@@ -3419,7 +3359,7 @@ function handleFileCancel(pt) {
         clearPendingDeliveryTimer(); // peer spoke — no need to guess anymore
         pendingDelivery = null;
         drainAckWaiters(); // unpark the send loop so it can observe the flag
-        drainDcWaiters();  // likewise a loop parked on a DC reconnect (16.9.1)
+        drainDcWaiters();  // likewise a loop parked on a DC reconnect
     }
 }
 
@@ -3429,7 +3369,7 @@ function handleFileCancel(pt) {
 async function handleFileNack(pt) {
     if (!lastSentFile || pt.length < 5 || (pt.length - 1) % 4 !== 0) return;
     const tid = pt[0];
-    if (tid !== lastSentTid) return; // NACK for a superseded transfer (16.9.6) — its file is gone, fail clean
+    if (tid !== lastSentTid) return; // NACK for a superseded transfer — its file is gone, fail clean
     // Pinned for the whole round: the globals may be cleared (session end) or
     // replaced (next send) while a read below is in flight, and this round must
     // then stop rather than read whatever is there now. `dead()` is the one test.
@@ -3455,11 +3395,9 @@ async function handleFileNack(pt) {
         seen.add(idx);
         wanted.push(idx);
     }
-    // Previously this function had no UI call anywhere in it: the receiver
-    // printed "(verifying transfer…)" while the sender's row sat frozen on
-    // "Sent · waiting for confirmation" for the whole repair, and the sender was
-    // then accused by the pending-delivery timer for a transfer it was actively
-    // fixing. Both ends must show that the same thing is happening. One line per
+    // Both ends must show that the same thing is happening: the receiver prints
+    // "(verifying transfer…)", so the sender's row says it is repairing rather
+    // than sitting on "Sent · waiting for confirmation". One line per
     // transfer, not per round — repeated identical lines read as repeated failures
     // rather than one ongoing repair (same reasoning as the receiver's line).
     repairActiveAt = Date.now();
@@ -3473,9 +3411,9 @@ async function handleFileNack(pt) {
         setFileMeta(pendingDelivery.refs, "Sent \u00b7 re-sending missing pieces", true);
     }
     for (let j = 0; j < wanted.length; j++) {
-        if (dcReconnecting) await waitDcSettled(); // 16.9.1: same park as the main loop
+        if (dcReconnecting) await waitDcSettled(); // same park as the main loop
         // Re-checked each pass: a T_FILE_CANCEL (0x01) arriving mid-round nulls the
-        // file and sets sendCancelled (16.8.2); a session end moves sessionGen on.
+        // file and sets sendCancelled; a session end moves sessionGen on.
         if (dead()) return;
         const idx = wanted[j];
         const offset = idx * CHUNK_SIZE;
@@ -3518,7 +3456,7 @@ async function handleFileNack(pt) {
     sendCtrlFrame(T_FILE_END, fileEndPayload(tid, lastSentDigestHex)).catch(() => {});
     repairActiveAt = Date.now();
     // The receiver grants itself a fresh grace window for each round's END
-    // (`endGraceSpent = false`, 2712), so the sender's wait for T_FILE_DONE must
+    // (`endGraceSpent = false` in handleFileEnd), so the sender's wait for T_FILE_DONE must
     // restart with it — otherwise the round's own duration is charged against a
     // budget sized for a single round trip. Row goes back to the honest interim
     // sentence; if the peer really is gone, the timer says so from here.
@@ -3533,7 +3471,7 @@ async function handleFileNack(pt) {
 // of the module: the join path reads `let` bindings declared throughout the
 // file (e.g. wsChunksInFlight), and running it mid-module hits the temporal
 // dead zone — the error is then swallowed by the event loop and the join
-// silently never happens (seen as an Android bug in real-device testing). Strip the hash via replaceState
+// silently never happens. Strip the hash via replaceState
 // first — fragments never reach the server, but the code shouldn't linger in
 // the address bar or browser history either.
 const hashMatch = location.hash.match(/^#(\d{9})$/);

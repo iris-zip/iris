@@ -9,7 +9,7 @@
 #   3. Hash the now-updated app.js, and hash the vendored client/qr.js.
 #   4. Rewrite the <script> tags in client/index.html with those hashes, and
 #      version-stamp the client/style.css link so the edge cannot serve a stale copy.
-#   5. Rewrite HASHES.md with all four hashes and the current git SHA.
+#   5. Rewrite HASHES.md with all four hashes and how to find its commit.
 #
 # Idempotent: each sed pattern tolerates either the placeholder or a prior hash.
 
@@ -60,7 +60,7 @@ sed -i -E \
 
 grep -q "src=\"app.js?v=$APP_JS_V\" integrity=\"$APP_JS_SRI\"" "$INDEX" || { echo "failed to inject app.js integrity" >&2; exit 1; }
 
-# 23.6 — vendored QR encoder ships verbatim (no build step), so just hash the
+# Vendored QR encoder ships verbatim (no build step), so just hash the
 # file as-is and stamp its <script> tag the same way as app.js.
 QR_JS_SRI="sha384-$(sha384_b64 "$QR_JS")"
 echo "qr.js        $QR_JS_SRI"
@@ -90,7 +90,7 @@ done
 
 echo "SRI hashes injected."
 
-# 15.5 — rewrite HASHES.md. Hashes are written as plain hex so a user can
+# Rewrite HASHES.md. Hashes are written as plain hex so a user can
 # reproduce with `sha384sum` without needing to base64-decode. SRI (base64)
 # values are also shown, because those are what Chrome DevTools displays.
 HASHES_MD="HASHES.md"
@@ -101,8 +101,9 @@ APP_JS_HEX=$(sha384_hex "$APP_JS")
 QR_JS_HEX=$(sha384_hex "$QR_JS")
 CRYPTO_JS_HEX=$(sha384_hex "$CRYPTO_JS")
 CRYPTO_WASM_HEX=$(sha384_hex "$CRYPTO_WASM")
-GIT_SHORT=$(git rev-parse --short HEAD 2>/dev/null || echo "(no git)")
-GIT_FULL=$(git rev-parse HEAD 2>/dev/null || echo "(no git)")
+# No commit hash is written into the file: this runs before the commit that
+# carries it, and a file cannot name the commit it is part of. The reader is told
+# how to find that commit instead.
 STAMP=$(date -u +"%Y-%m-%dT%H:%M:%SZ")
 
 cat > "$HASHES_MD" <<EOF
@@ -114,7 +115,7 @@ actually loaded (Chrome DevTools → Network tab → click file → Headers /
 Response tab shows the integrity value) to confirm you're running the
 exact code in this git commit.
 
-**Commit:** \`$GIT_FULL\` (\`$GIT_SHORT\`)
+**Commit:** the commit that contains this file — \`git log -1 --format=%H -- HASHES.md\`
 **Generated:** $STAMP (UTC) — by \`scripts/build-sri.sh\`
 
 ## Client files (run in your browser)
@@ -148,4 +149,4 @@ repo was tampered with or you're on a different commit.
   output.
 EOF
 
-echo "wrote $HASHES_MD (commit $GIT_SHORT)"
+echo "wrote $HASHES_MD"

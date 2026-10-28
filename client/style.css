@@ -624,7 +624,7 @@ img, svg { display: block; max-width: 100%; }
   justify-content: center;
 }
 
-/* 23.6 QR pairing: white quiet-zone box regardless of theme (QRs need a
+/* QR pairing: white quiet-zone box regardless of theme (QRs need a
    light background to stay scannable in dark mode). Empty <div> when the
    vendored encoder didn't load or generate anything, so it collapses. */
 .bm-qr {
@@ -1126,7 +1126,7 @@ img, svg { display: block; max-width: 100%; }
    cannot be varied per pair. */
 .bm-msg--stacked { margin-top: calc(var(--sp-1) - var(--sp-3)); }
 
-/* 23.1 — collapse long messages behind a fade + toggle */
+/* Collapse long messages behind a fade + toggle */
 .bm-msg-bubble--collapsed {
   max-height: 9em;
   overflow: hidden;
@@ -1134,7 +1134,7 @@ img, svg { display: block; max-width: 100%; }
   -webkit-mask-image: linear-gradient(to bottom, #000 80%, transparent 100%);
 }
 
-/* 23.2 — actions row holds the collapse toggle and copy button side by side */
+/* Actions row holds the collapse toggle and copy button side by side */
 .bm-msg-actions {
   display: flex;
   align-items: center;
@@ -1175,7 +1175,7 @@ img, svg { display: block; max-width: 100%; }
 
 .bm-msg-toggle:hover { color: var(--fg-default); }
 
-/* 23.9 — icon copy button: quiet by default, revealed on message hover (desktop),
+/* Icon copy button: quiet by default, revealed on message hover (desktop),
    kept faintly visible + tappable on touch devices where there is no hover. */
 .bm-msg-copy {
   position: absolute;
@@ -1523,7 +1523,7 @@ img, svg { display: block; max-width: 100%; }
    must never depend on JS having cleaned up first. */
 .bm-file-row--done .bm-progress-fill { background: var(--status-ok); }
 
-/* 23.3 — inline thumbnail, display-only */
+/* Inline thumbnail, display-only */
 .bm-file-thumb {
   display: block;
   /* .bm-file-row is a column flex container, whose default align-items:stretch
