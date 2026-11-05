@@ -12,7 +12,7 @@
 
 ```sh
 cd crypto
-wasm-pack build --target web --mode no-install
+wasm-pack build --target web --mode no-install --out-dir ../client/pkg
 cd ..
 ```
 
@@ -44,17 +44,22 @@ Output: `server/target/release/iris-server`
 
 Server listens on `127.0.0.1:8080` by default.
 
-## Verifying reproducibility
+## Verifying what the site serves
 
-Two clean checkouts on the same OS and Rust version should produce byte-identical WASM. To verify:
+`HASHES.md` lists the SHA-384 of every script the browser runs. To check the live site against it:
 
 ```sh
-sha384sum client/pkg/iris_crypto_bg.wasm
+for f in app.js qr.js pkg/iris_crypto.js pkg/iris_crypto_bg.wasm; do
+  curl -s "https://iriszip.com/$f" | sha384sum
+done
 ```
 
-Compare against the `wasm` row in `HASHES.md`. They must match exactly.
+Each value must match its row in `HASHES.md` exactly.
 
-The server binary is not guaranteed byte-identical across different OS/linker versions — only the WASM is pinned in `HASHES.md` because that is what the browser executes.
+**The WASM build is not yet bit-for-bit reproducible.** A clean rebuild from this
+repository produces a matching `iris_crypto.js`, but its `iris_crypto_bg.wasm` can
+differ from the published one. Making it reproducible is open work. The server binary is not
+reproducible either; it never sees plaintext, so the browser files are what matter.
 
 ## Running tests
 
@@ -64,7 +69,4 @@ cd server && cargo test && cd ..
 
 # WASM crypto tests
 cd crypto && wasm-pack test --headless --firefox && cd ..
-
-# Browser integration tests
-cd tests/browser && npm install && npx playwright install chromium && npx playwright test && cd ../..
 ```

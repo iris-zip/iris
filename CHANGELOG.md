@@ -112,9 +112,10 @@ since some earlier version — there was no earlier public version.
 ### Running it yourself
 
 - Docker Compose and a plain binary both work. See [`SELFHOST.md`](./SELFHOST.md).
-- The Rust toolchain is pinned, so the WASM module builds reproducibly. Expected
-  hashes are in [`BUILD.md`](./BUILD.md).
-- Browser test suite and CI included.
+- The Rust toolchain is pinned. The WASM module is not yet bit-for-bit
+  reproducible; see [`BUILD.md`](./BUILD.md). Published hashes are in
+  [`HASHES.md`](./HASHES.md).
+- CI included.
 
 ### Licensing
 

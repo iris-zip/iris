@@ -2,7 +2,7 @@
 # `make deploy` encodes the release order so it can never be run backwards:
 # SRI hashes are computed from the freshly built wasm, so wasm MUST come first.
 
-.PHONY: deploy wasm sri server test test-browser
+.PHONY: deploy wasm sri server test
 
 deploy: wasm sri server
 
@@ -18,6 +18,3 @@ server:
 test:
 	cd server && cargo test
 	cd crypto && wasm-pack test --headless --firefox
-
-test-browser:
-	cd tests/browser && npx playwright test
