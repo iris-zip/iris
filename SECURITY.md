@@ -113,3 +113,11 @@ artefact we stand behind.
 An external review is a point-in-time statement about a design. It is not a
 guarantee, and it is not a substitute for you reading the code — which is why the
 code is here.
+
+## Acknowledgements
+
+People who reported a real issue in good faith, by the name they chose.
+
+- **2026-11-05** — Thanks to zamzam brengos (independent researcher) for reporting
+  that the deployed client build did not match the published source and HASHES.md.
+  Fixed the same day.
